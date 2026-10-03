@@ -1,0 +1,8 @@
+{
+  "name": "po-bot",
+  "private": true,
+  "description": "Pocket Option OTC research extension — tests only, no dependencies",
+  "scripts": {
+    "test": "node --test tests/*.test.js"
+  }
+}

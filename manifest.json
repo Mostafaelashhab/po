@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "My PO Bot",
+  "version": "0.7.2",
+  "description": "Personal Pocket Option research assistant: multi-pair OTC scanner, decision engine and statistics (demo/paper first).",
+  "permissions": ["storage", "unlimitedStorage", "notifications"],
+  "host_permissions": ["https://pocketoption.com/*", "https://po.trade/*", "https://po.cash/*"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "مراقب OTC", "default_popup": "popup/index.html", "default_icon": { "128": "icon128.png" } },
+  "icons": { "128": "icon128.png" },
+  "web_accessible_resources": [{ "resources": ["fonts/Cairo.ttf"], "matches": ["https://pocketoption.com/*", "https://po.trade/*", "https://po.cash/*"] }],
+  "content_scripts": [
+    {
+      "matches": ["https://pocketoption.com/*", "https://po.trade/*", "https://po.cash/*"],
+      "js": ["page-hook.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://pocketoption.com/*", "https://po.trade/*", "https://po.cash/*"],
+      "js": ["indicators.js", "strategy.js", "backtest.js",
+        "engine/core.js", "engine/dataquality.js", "engine/features.js", "engine/regime.js",
+        "engine/factory.js", "engine/library.js", "engine/confluence.js", "engine/contradiction.js",
+        "engine/risk.js", "engine/pipeline.js", "engine/stats.js", "engine/feed.js",
+        "engine/featurelib.js", "engine/lifecycle.js", "engine/facts.js",
+        "engine/expiry.js", "engine/copytrade.js", "engine/opportunity.js", "engine/calibration.js", "engine/frameselect.js", "ui/ar.js",
+        "bot.js", "intel-tab.js"],
+      "run_at": "document_start"
+    }
+  ]
+}

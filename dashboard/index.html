@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>مراقب OTC — الوضع المتقدم</title>
+  <link rel="icon" href="../icon128.png">
+  <link rel="stylesheet" href="dashboard.css">
+</head>
+<body>
+  <header>
+    <div class="brand"><img src="../icon128.png" alt=""><span>مراقب OTC <small class="muted" style="font-weight:500">· الوضع المتقدم</small></span></div>
+    <nav id="nav">
+      <button data-view="live" class="on">مباشر</button>
+      <button data-view="log">القرارات</button>
+      <button data-view="stats">الإحصائيات</button>
+      <button data-view="matrix">مصفوفة الاستراتيجيات</button>
+      <button data-view="validation">التحقق</button>
+      <button data-view="discovery">الاكتشاف</button>
+      <button data-view="research">البيانات</button>
+      <button data-view="settings">الإعدادات</button>
+    </nav>
+    <div class="hdr-right">
+      <label class="mode">الوضع
+        <select id="execMode">
+          <option value="OBSERVE">مراقبة فقط (بدون تسجيل ورقي)</option>
+          <option value="PAPER">مراقبة فقط (تداول ورقي)</option>
+          <option value="ALERT">تنبيه فقط</option>
+          <option value="MANUAL">تأكيد يدوي</option>
+          <option value="AUTO">تنفيذ تلقائي (المعتمد فقط)</option>
+        </select>
+      </label>
+      <button id="emergency" class="danger">إيقاف النظام</button>
+    </div>
+  </header>
+  <div id="banner" class="banner hidden"></div>
+  <main>
+    <section id="view-live" class="view"></section>
+    <section id="view-log" class="view hidden"></section>
+    <section id="view-stats" class="view hidden"></section>
+    <section id="view-matrix" class="view hidden"></section>
+    <section id="view-validation" class="view hidden"></section>
+    <section id="view-discovery" class="view hidden"></section>
+    <section id="view-research" class="view hidden"></section>
+    <section id="view-settings" class="view hidden"></section>
+  </main>
+  <script src="../indicators.js"></script>
+  <script src="../engine/core.js"></script>
+  <script src="../engine/dataquality.js"></script>
+  <script src="../engine/features.js"></script>
+  <script src="../engine/regime.js"></script>
+  <script src="../engine/factory.js"></script>
+  <script src="../engine/library.js"></script>
+  <script src="../engine/confluence.js"></script>
+  <script src="../engine/contradiction.js"></script>
+  <script src="../engine/risk.js"></script>
+  <script src="../engine/pipeline.js"></script>
+  <script src="../engine/stats.js"></script>
+  <script src="../engine/replay.js"></script>
+  <script src="../engine/featurelib.js"></script>
+  <script src="../engine/discovery.js"></script>
+  <script src="../engine/discovery-search.js"></script>
+  <script src="../engine/discovery-assess.js"></script>
+  <script src="../engine/lifecycle.js"></script>
+  <script src="../ui/ar.js"></script>
+  <script src="../db.js"></script>
+  <script src="dashboard.js"></script>
+</body>
+</html>
