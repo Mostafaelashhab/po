@@ -1,14 +1,19 @@
-// Calibrated confidence. The confidence that gates a trade is NOT a score built from how
-// many indicators agree, and NOT a promised win rate. It is:
+// Calibrated decision model. No fixed confidence number decides a trade. For each opportunity:
 //
-//     P( true win rate of this kind of setup > break-even  |  outcomes of similar past setups )
+//   raw score          the engine's internal analysis score (kept separate, never used here)
+//   estimated win prob posterior mean of the win rate of SIMILAR past setups, out-of-sample,
+//                      with a sceptical prior centred on break-even (+ a 90% interval, sample size)
+//   expected value     per stake, at the pair's CURRENT payout — the decision quantity
+//   stability          walk-forward thirds of the cohort; any third below break-even → unstable
+//   P(edge)            P(true win rate > break-even), reported
 //
-// computed from resolved outcomes only, with a sceptical prior centred on break-even, on
-// data that was not used to choose the duration (chronological split: the older part picks
-// the horizon, the newer part is out-of-sample and gives the probability). Indicators
-// agreeing can never raise it; only measured results can. Unstable cohorts (a walk-forward
-// fold below break-even) are capped below any gate. A monitor checks afterwards whether
-// decisions above the gate really beat break-even; if they don't, the model is rejected.
+// "Similar" follows a hierarchy, most specific first; the first level with enough out-of-sample
+// outcomes AND stable is used (if none is stable, the most specific measured one, flagged).
+// The older part of a cohort chooses the duration (train), the newer part measures it (OOS).
+// Without enough outcomes the status is INSUFFICIENT_DATA: no probability is guessed.
+// Indicators agreeing can never raise anything here; only measured results can. A monitor
+// compares estimated probabilities with what then happened (calibration error) and rejects the
+// model if the entries it let through on measured evidence don't beat break-even.
 (function (G) {
   const OTC = G.OTC, U = OTC.U;
 
@@ -60,10 +65,13 @@
   // Which past records count as "similar". Most specific first; the first level with enough
   // out-of-sample outcomes is used (the choice depends on sample size only, never on results).
   const LEVELS = [
-    { id: 'pair', key: (c) => `${c.frame}|${c.setup}|${c.dir}|${c.regime}|${c.asset}` },
-    { id: 'setup_regime', key: (c) => `${c.frame}|${c.setup}|${c.dir}|${c.regime}` },
-    { id: 'setup', key: (c) => `${c.frame}|${c.setup}|${c.dir}` },
-    { id: 'kind_regime', key: (c) => `${c.frame}|k:${c.kind}|${c.dir}|${c.regime}` },
+    { id: 'pair', key: (c) => `${c.frame}|${c.setup}|${c.dir}|${c.regime}|${c.asset}` },     // pair + strategy + frame + direction + regime
+    { id: 'pair_setup', key: (c) => `${c.frame}|${c.setup}|${c.dir}|*|${c.asset}` },         // pair + strategy + frame + direction
+    { id: 'setup_regime', key: (c) => `${c.frame}|${c.setup}|${c.dir}|${c.regime}` },       // strategy + frame + direction + regime
+    { id: 'setup', key: (c) => `${c.frame}|${c.setup}|${c.dir}` },                          // strategy + frame + direction
+    { id: 'kind_regime', key: (c) => `${c.frame}|k:${c.kind}|${c.dir}|${c.regime}` },       // strategy family + frame + regime
+    { id: 'kind', key: (c) => `${c.frame}|k:${c.kind}|${c.dir}` },                          // strategy family + frame
+    { id: 'frame', key: (c) => `${c.frame}|*|${c.dir}` },                                   // broader population of the frame
   ];
 
   // A record as a cohort member: its descriptors and its outcome at each horizon (SECONDS after the
@@ -99,11 +107,14 @@
   // tables[source][key][seconds] = { sel: [w, l], oos: [w, l], folds: [[w, l] ×k], n }
   // Built by the service worker from all records; sent to the tabs.
   function buildTables(records, cfg = OTC.DEFAULT_CONFIG) {
-    const g = cfg.gate, out = { entries: {}, setups: {}, builtAt: Date.now() };
+    const builtAt = Date.now();
+    const g = cfg.gate, out = { entries: {}, setups: {}, builtAt, version: `cal-${builtAt}` };
+    let first = Infinity, last = -Infinity, members = 0;
     const groups = { entries: new Map(), setups: new Map() };
     for (const r of records) {
       const m = member(r);
       if (!m) continue;
+      members++; first = Math.min(first, m.ts); last = Math.max(last, m.ts);
       for (const L of LEVELS) {
         const k = L.key(m);
         const map = groups[m.source];
@@ -151,72 +162,88 @@
       if (b.pay.length < 500) b.pay.push(m.payout ?? 85);
     }
     for (const [tf, b] of Object.entries(byFrame)) if (b.w + b.l >= g.minOOS) out.frames[tf] = +(100 * pEdge(b.w, b.l, U.breakEven(U.mean(b.pay)), g.priorStrength)).toFixed(1);
+    // reproducibility: what this version was built from
+    out.meta = { records: records.length, members, from: Number.isFinite(first) ? first : null, to: Number.isFinite(last) ? last : null,
+      cohorts: { entries: Object.keys(out.entries).length, setups: Object.keys(out.setups).length }, selFraction: g.selFraction, minOOS: g.minOOS, priorStrength: g.priorStrength };
     return out;
   }
 
   // c: { frame, setup, kind, dir, regime, asset, payout }
-  // Picks the cohort, lets the expiry engine choose the duration on the SELECTION part, and
-  // computes P(edge) on the OUT-OF-SAMPLE part at that duration.
-  // Returns { p (0–100), expirySec, expiry, source, level, key, oos: {w, l, n, wr}, stable, folds, be, reason }.
+  // Returns { status: 'MEASURED' | 'INSUFFICIENT_DATA', measured, reason, winProb, interval, ev, evLo, p, n, oos,
+  //           stable, folds, level, source, key, expirySec, expiry, be, version }.
   function assess(c, tables, { cfg = OTC.DEFAULT_CONFIG, available = null, expiryOpts = {} } = {}) {
-    const g = cfg.gate, be = U.breakEven(c.payout ?? 85);
-    let pick = null;
-    for (const src of ['entries', 'setups']) {
-      for (const L of LEVELS) {
-        const t = tables?.[src]?.[L.key(c)];
-        if (!t) continue;
-        const best = Math.max(...Object.values(t).map((x) => x.oos[0] + x.oos[1]));
-        if (best >= g.minOOS) { pick = { src, L, t }; break; }
-      }
-      if (pick) break;
+    const g = cfg.gate, pay = c.payout ?? 85, be = U.breakEven(pay);
+    const choose = (history) => OTC.Expiry.choose({ tf: c.frame, kind: c.kind, available, history, cfg, ...expiryOpts });
+    // cohorts with enough out-of-sample outcomes, most specific first (live entries before research setups)
+    const cands = [];
+    for (const src of ['entries', 'setups']) for (const L of LEVELS) {
+      const t = tables?.[src]?.[L.key(c)];
+      if (t && Math.max(...Object.values(t).map((x) => x.oos[0] + x.oos[1])) >= g.minOOS) cands.push({ src, L, t });
     }
-    const sel = pick ? (sec) => { const x = pick.t[sec]; if (!x) return null; const n = x.sel[0] + x.sel[1]; if (!n) return null;
-      const wr = (100 * x.sel[0]) / n; return { n, wr, lo: OTC.Stats.wilson(x.sel[0], n).lo, be }; } : null;
-    const ex = OTC.Expiry.choose({ tf: c.frame, kind: c.kind, available, history: sel, cfg, ...expiryOpts });
-    const base = { expirySec: ex.sec, expiry: { source: ex.source, reason: ex.reason }, be };
-    if (!pick) return { ...base, p: 0, source: null, level: null, key: null, oos: null, stable: null, folds: null, reason: 'no_history' };
-    const x = pick.t[ex.sec];
-    if (!x || x.oos[0] + x.oos[1] < g.minOOS) {
-      return { ...base, p: 0, source: pick.src, level: pick.L.id, key: pick.L.key(c), oos: null, stable: null, folds: null, reason: 'no_history_at_duration' };
+    const evaluate = ({ src, L, t }) => {
+      // the duration is chosen on the older part only (train), then locked
+      const ex = choose((sec) => { const x = t[sec]; if (!x) return null; const n = x.sel[0] + x.sel[1]; if (!n) return null;
+        return { n, wr: (100 * x.sel[0]) / n, lo: OTC.Stats.wilson(x.sel[0], n).lo, be }; });
+      const x = t[ex.sec], base = { expirySec: ex.sec, expiry: { source: ex.source, reason: ex.reason }, source: src, level: L.id, key: L.key(c) };
+      if (!x || x.oos[0] + x.oos[1] < g.minOOS) return { ...base, measured: false };
+      // …and measured on the newer part (out-of-sample)
+      const [w, l] = x.oos, n = w + l, a = g.priorStrength * (be / 100) + w, b = g.priorStrength * (1 - be / 100) + l;
+      const winProb = (100 * a) / (a + b), ci = OTC.Stats.wilson(w, n);
+      const evOf = (q) => +((q / 100) * (pay / 100) - (1 - q / 100)).toFixed(4);
+      const folds = x.folds.map(([fw, fl]) => ({ n: fw + fl, wr: fw + fl ? (100 * fw) / (fw + fl) : null }));
+      const stable = folds.every((f) => f.n < g.foldMinN || f.wr >= be);
+      return { ...base, measured: true, winProb: +winProb.toFixed(1), interval: [+ci.lo.toFixed(1), +ci.hi.toFixed(1)], ev: evOf(winProb), evLo: evOf(ci.lo),
+        p: +(100 * pEdge(w, l, be, g.priorStrength)).toFixed(1), n: +n.toFixed(1), oos: { w, l, n: +n.toFixed(1), wr: +((100 * w) / n).toFixed(1) }, stable, folds };
+    };
+    let firstMeasured = null, chosen = null;
+    for (const cd of cands) {
+      const r = evaluate(cd);
+      if (!r.measured) continue;
+      firstMeasured ||= r;
+      if (r.stable) { chosen = r; break; }
     }
-    const [w, l] = x.oos, n = w + l;
-    let p = 100 * pEdge(w, l, be, g.priorStrength);
-    const folds = x.folds.map(([fw, fl]) => ({ n: fw + fl, wr: fw + fl ? (100 * fw) / (fw + fl) : null }));
-    const stable = folds.every((f) => f.n < g.foldMinN || f.wr >= be);
-    let reason = 'measured';
-    if (!stable) { p = Math.min(p, g.unstableCap); reason = 'unstable'; }
-    return { ...base, p: +p.toFixed(1), source: pick.src, level: pick.L.id, key: pick.L.key(c), oos: { w, l, n: +n.toFixed(1), wr: +((100 * w) / n).toFixed(1) },
-      stable, folds, reason };
+    const r = chosen || firstMeasured;
+    if (!r) {
+      const ex = choose(null);
+      return { status: 'INSUFFICIENT_DATA', measured: false, reason: cands.length ? 'no_history_at_duration' : 'no_history', winProb: null, interval: null, ev: null, evLo: null,
+        p: 0, n: 0, oos: null, stable: null, folds: null, level: null, source: null, key: null, expirySec: ex.sec, expiry: { source: ex.source, reason: ex.reason }, be, version: tables?.version ?? null };
+    }
+    return { ...r, status: 'MEASURED', reason: r.stable ? 'measured' : 'unstable', be, version: tables?.version ?? null };
   }
 
-  // ── is the confidence honest? ──────────────────────────────────────────────
-  // Entries (traded or gated) resolved at their own duration, by the confidence claimed at entry.
-  // Entries whose MEASURED confidence was at or above minConfidence are the ones the model let
-  // through on evidence; once monitorMinN have resolved, if their win rate's upper bound is below
-  // break-even the model is rejected, and if the lower bound is above it, confirmed.
+  // ── is the model honest? ───────────────────────────────────────────────────
+  // Entries (traded or gated) resolved at their own duration. Measured ones are bucketed by the win
+  // probability estimated at entry and compared with what happened (calibration error). The entries
+  // the model let through ON MEASURED EVIDENCE decide its status: once monitorMinN have resolved,
+  // win rate upper bound below break-even → REJECTED, lower bound above → CONFIRMED.
   function monitor(records, cfg = OTC.DEFAULT_CONFIG) {
     const g = cfg.gate;
-    const rows = [[null, null], [0, 50], [50, 70], [70, 90], [90, 101]].map(([lo, hi]) => ({ lo, hi, w: 0, l: 0, t: 0, pay: [] }));
-    const top = { w: 0, l: 0, t: 0, pay: [] };
-    const add = (b, o, pay) => { b[{ W: 'w', L: 'l', T: 't' }[o]]++; b.pay.push(pay ?? 85); };
+    const rows = [[null, null], [0, 50], [50, 55], [55, 60], [60, 65], [65, 101]].map(([lo, hi]) => ({ lo, hi, w: 0, l: 0, t: 0, pay: [], pred: [] }));
+    const top = { w: 0, l: 0, t: 0, pay: [], pred: [] };
+    const add = (b, o, pay, pred) => { b[{ W: 'w', L: 'l', T: 't' }[o]]++; b.pay.push(pay ?? 85); if (pred != null && o !== 'T') b.pred.push(pred); };
     for (const r of records) {
       if (r.kind !== 'opp' || !r.cal || !r.expirySec || !r.path?.some((s) => s === 'ENTERED' || s === 'GATED')) continue;
       const o = OTC.Stats.outcome(r, r.lean, r.expirySec / (r.tf || 60));
       if (!o) continue;
-      const measured = r.cal.reason === 'measured' || r.cal.reason === 'unstable';
-      add(measured ? rows.find((b) => b.lo != null && r.cal.p >= b.lo && r.cal.p < b.hi) : rows[0], o, r.payout);
-      if (measured && r.cal.p >= g.minConfidence) add(top, o, r.payout);
+      const measured = r.cal.measured ?? (r.cal.reason === 'measured' || r.cal.reason === 'unstable');
+      const pred = r.cal.winProb ?? null;
+      add(measured && pred != null ? rows.find((b) => b.lo != null && pred >= b.lo && pred < b.hi) : rows[0], o, r.payout, pred);
+      if (measured && r.cal.qualified) add(top, o, r.payout, pred);
     }
     const fin = (b) => {
       const n = b.w + b.l, ci = OTC.Stats.wilson(b.w, n);
       b.n = n; b.wr = n ? (100 * b.w) / n : null; b.ci = [ci.lo, ci.hi]; b.be = U.breakEven(b.pay.length ? U.mean(b.pay) : 85);
-      delete b.pay;
+      b.predicted = b.pred.length ? U.mean(b.pred) : null;
+      delete b.pay; delete b.pred;
       return b;
     };
     rows.forEach(fin); fin(top);
+    // expected calibration error over the measured buckets (percentage points)
+    const measuredRows = rows.filter((b) => b.lo != null && b.n && b.predicted != null), N = measuredRows.reduce((s, b) => s + b.n, 0);
+    const calibrationError = N ? +(measuredRows.reduce((s, b) => s + (b.n / N) * Math.abs(b.predicted - b.wr), 0)).toFixed(1) : null;
     let status = 'COLLECTING';
     if (top.n >= g.monitorMinN) status = top.ci[1] < top.be ? 'REJECTED' : top.ci[0] >= top.be ? 'CONFIRMED' : 'OK';
-    return { status, rows, top, gate: g.minConfidence };
+    return { status, rows, top, calibrationError, measuredN: N };
   }
 
   OTC.Calibration = { pEdge, ibeta, LEVELS, member, buildTables, assess, monitor };

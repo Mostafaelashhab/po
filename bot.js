@@ -1018,16 +1018,38 @@ function typeInto(input, text) {
     input.dispatchEvent(new Event('input', { bubbles: true }));
   }
 }
+function clearInput(input) {
+  if (!input || !input.value) return;
+  input.focus();
+  input.select?.();
+  if (!document.execCommand('delete')) {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, '');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  input.blur();
+}
+// PO's list ignores Escape and can stay open after a pick: clear what we typed, then close it with the
+// pair button (a toggle) if Escape didn't.
+let typedInto = null;
+async function closeAssetList() {
+  clearInput(typedInto);
+  typedInto = null;
+  for (let i = 0; i < 3 && assetList(); i++) {
+    if (i === 0) document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    else assetMenuOpener()?.click();
+    await sleep(200);
+  }
+}
 async function switchAsset(asset) {
   if (state.asset === asset) return null;
   const label = assetName(asset);
-  const close = () => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-  const fail = (err, opener = null) => {
+  const close = () => closeAssetList();
+  const fail = async (err, opener = null) => {
     try {
       chrome.storage.local.set({ assetMenuSample: { at: Date.now(), asset, err, opener: opener?.outerHTML?.slice(0, 1500) || null,
         list: (assetList() || document.querySelector(ASSET_LIST))?.outerHTML?.slice(0, 12000) || null } });
     } catch (_) {}
-    close();
+    await close();
     return err;
   };
   let list = assetList(), opener = null;
@@ -1043,6 +1065,7 @@ async function switchAsset(asset) {
     const root = list.closest('[class*="assets-block"]')?.parentElement || list.parentElement || document;
     const input = [...root.querySelectorAll('input')].find(isShown);
     if (input) {
+      typedInto = input;
       typeInto(input, label.replace(/ OTC$/, ''));
       for (let i = 0; i < 8 && !item; i++) { await sleep(150); item = assetItem(assetList() || list, asset); }
     }
@@ -1050,8 +1073,9 @@ async function switchAsset(asset) {
   if (!item) return fail(`${label} not found in the asset list`, opener);
   item.click();
   for (let i = 0; i < 20 && state.asset !== asset; i++) await sleep(150); // PO confirms with changeSymbol
-  if (assetList()) close();
-  return state.asset === asset ? null : fail(`chart did not switch to ${label} (PO shows ${state.asset})`, opener);
+  if (state.asset !== asset) return fail(`chart did not switch to ${label} (PO shows ${state.asset})`, opener);
+  await close();
+  return null;
 }
 
 function clickDirection(dir) {

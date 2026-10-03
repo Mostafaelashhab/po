@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "My PO Bot",
-  "version": "0.7.2",
+  "version": "0.8.0",
   "description": "Personal Pocket Option research assistant: multi-pair OTC scanner, decision engine and statistics (demo/paper first).",
   "permissions": ["storage", "unlimitedStorage", "notifications"],
   "host_permissions": ["https://pocketoption.com/*", "https://po.trade/*", "https://po.cash/*"],

@@ -267,7 +267,7 @@ function viewSettings() {
       <div class="item stack"><div class="t">فريمات البحث عن الفرص<small>لا يوجد فريم ثابت: كل فرصة تأخذ فريمها وفريم السياق والتأكيد المناسب لها. فريمات الثواني للأزواج المفتوحة على الشارت فقط.</small></div>
         <div class="seg wrap">${[[5, '5ث'], [10, '10ث'], [15, '15ث'], [30, '30ث'], [60, 'دقيقة'], [300, '5د'], [900, '15د']].map(([v, l]) => `<button class="${(c.setupFrames || []).includes(v) ? 'on' : ''}" data-frame="${v}">${l}</button>`).join('')}</div></div>
       <div class="item"><div class="t">أقل نسبة ربح للدخول<small>لا يدخل النظام (ورقيًا أو فعليًا) على زوج نسبة ربحه أقل من ذلك</small></div><span>${c.gate?.minPayout ?? 92}%</span></div>
-      <div class="item"><div class="t">الثقة المعايرة<small>احتمال أن هذا النوع من الفرص يتفوق على نقطة التعادل، من نتائج فرص مشابهة سابقة. تمنع الدخول فقط عندما تُقاس وتكون أقل من ${c.gate?.minConfidence ?? 50}%.</small></div><span>${e(AR.MODEL[s.calStatus?.status] || AR.MODEL.COLLECTING)}</span></div>
+      <div class="item"><div class="t">نموذج القرار<small>لا يوجد رقم ثابت للثقة. احتمال الفوز يُقدَّر من نتائج فرص مشابهة سابقة، ولا دخول إلا إذا كان الربح المتوقع موجبًا والنتائج مستقرة. بلا بيانات كافية: تجريبي فقط، لا حساب حقيقي.</small></div><span>${e(AR.MODEL[s.calStatus?.status] || AR.MODEL.COLLECTING)}</span></div>
       <div class="item"><div class="t">مدة الصفقة<small>تُختار لكل فرصة حسب نوعها وسرعة السوق، ثم حسب ما نجح سابقًا</small></div><span>يحددها النظام</span></div>
       <div class="item"><div class="t">توقيت الدخول<small>عند إغلاق الشمعة، فورًا أو بعد تأكيد أو عودة السعر</small></div><span>يحدده النظام</span></div></div>
     <div class="label space">التنبيهات</div><div class="set"><div class="item"><div class="t">تنبيه الفرص</div>

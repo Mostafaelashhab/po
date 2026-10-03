@@ -200,6 +200,9 @@ function assignScan() {
 
 // ── decisions and the candidate queue ───────────────────────────────────────
 async function onDecision(tabId, { record, cand }) {
+  // record times are PO's clock (≈ UTC+2h); keep the real UTC time it was logged too
+  record.loggedAt = Date.now();
+  record.poClockOffset = Math.round(clockOffset);
   if (cfg.execMode === 'OBSERVE' || !cand) record.exec = { mode: cfg.execMode, action: 'none' };
   pending.set(record.id, record);
   await DB.put('records', record);
@@ -223,9 +226,14 @@ async function onDecision(tabId, { record, cand }) {
 
 // What became of an entry, for the tab that found it (its panel and the popup show it instead of a
 // bare "enter now"): sent / placed / confirmed / failed / shadow / risk / gated / paper / alert / manual.
+// One execution state per opportunity record, kept apart from how the analysis turned out:
+// an analysis can be right and its execution fail.
+const EXEC_STATE = { sent: 'SENT', placed: 'EXECUTED', confirmed: 'EXECUTED', unconfirmed: 'EXECUTION_FAILED', failed: 'EXECUTION_FAILED',
+  shadow: 'SHADOW', risk: 'PROTECTION_BLOCKED', gated: 'GATED', paper: 'PAPER', alert: 'ALERT', manual: 'AWAITING_CONFIRMATION', research: 'RESEARCH_ONLY' };
 function tellTab(cand, action, detail = null) {
   const t = tabs.get(cand.originTab ?? cand.tabId);
   try { t?.port.postMessage({ type: 'oppAction', id: cand.id, action, detail }); } catch (_) {}
+  if (isOpp(cand) && EXEC_STATE[action]) updateRecord(cand.id, (r) => { r.execState = EXEC_STATE[action]; r.execDetail = detail ?? null; }).catch(() => {});
 }
 
 // In AUTO/MANUAL, an entry no armed tab can place (its pair is on no armed chart, and there is no time
@@ -319,11 +327,11 @@ async function act(cand, { shadow = false } = {}) {
   const mode = cfg.execMode;
   // The confidence gate is enforced here too: nothing below it is traded, in any mode.
   // The entry gate is enforced here too: payout ≥ gate.minPayout, a qualified opportunity, and a
-  // measured confidence (if any) not below gate.minConfidence. Nothing failing it is traded, in any mode.
+  // positive expected value when it has been measured. Nothing failing it is traded, in any mode.
   const gateFail = (cand.payout ?? 0) < cfg.gate.minPayout ? `payout ${cand.payout ?? '?'}% < ${cfg.gate.minPayout}%`
     : isOpp(cand) && !cand.cal?.qualified ? 'not qualified'
-    : isOpp(cand) && cand.cal?.measured && cand.cal.p < cfg.gate.minConfidence ? `confidence ${cand.cal.p}% < ${cfg.gate.minConfidence}%`
-    : calStatus.status === 'REJECTED' ? 'confidence model rejected' : null;
+    : isOpp(cand) && cand.cal?.measured && !(cand.cal.ev > 0) ? `expected value ${cand.cal.ev} ≤ 0 at ${cand.payout}% payout`
+    : calStatus.status === 'REJECTED' ? 'decision model rejected' : null;
   if (gateFail) {
     tellTab(cand, 'gated', gateFail);
     return updateRecord(cand.id, (r) => { r.decision = 'SKIP'; r.skipReasons = [...r.skipReasons, `entry gate (worker): ${gateFail}`]; r.exec = { mode, action: 'gated' }; });
@@ -373,6 +381,11 @@ async function act(cand, { shadow = false } = {}) {
     // The user decides, per account type, whether AUTO executes every engine decision or only promoted profiles.
     const isDemo = tabs.get(cand.tabId)?.isDemo;
     const all = isDemo === true ? cfg.autoDemoAll !== false : isDemo === false ? cfg.autoRealAll === true : false;
+    // a real account never trades INSUFFICIENT_DATA: only measured, positive-EV opportunities (or promoted patterns)
+    if (!profile && all && isDemo === false && isOpp(cand) && !cand.cal?.measured) {
+      await paper('paper', { note: 'real account: insufficient data — research only', insufficient: true, shadow: true });
+      return tellTab(cand, 'research', 'insufficient data');
+    }
     if (!profile && all) return sendExecute(cand, { ...base, action: 'auto', note: `${isDemo ? 'demo' : 'real'}: all engine decisions (user setting)` });
     if (!profile) return paper('paper', { note: 'AUTO: setup not a promoted profile → paper only' });
     // profile expiries are in 5M candles
@@ -396,7 +409,7 @@ async function sendExecute(cand, exec) {
 }
 
 async function finishManual(id, reason) {
-  await updateRecord(id, (r) => { r.exec = { ...(r.exec || {}), action: 'manual', status: 'expired', reason }; });
+  await updateRecord(id, (r) => { r.exec = { ...(r.exec || {}), action: 'manual', status: 'expired', reason }; if (r.kind === 'opp') { r.execState = 'NOT_CONFIRMED'; r.execDetail = reason; } });
   pushDash();
 }
 
@@ -405,6 +418,7 @@ async function onExecResult({ id, status, reason, poId, stake, demo, expirySec }
     r.exec = { ...(r.exec || {}), status, ...(reason ? { reason } : {}), ...(poId ? { poId } : {}), ...(stake ? { stake, demo } : {}) };
     // the tab placed it with the closest duration PO offers: the trade is judged on that one
     if (expirySec && isOpp(r) && r.exec.expiry !== expirySec) { r.exec.chosenExpiry = r.exec.expiry; r.exec.expiry = expirySec; }
+    if (isOpp(r) && EXEC_STATE[status]) { r.execState = EXEC_STATE[status]; r.execDetail = reason || null; }
   });
   if (!rec) return;
   if (rec.originTab != null || rec.kind === 'opp') {
@@ -595,7 +609,7 @@ function pushDash(now = false) {
   const msg = { type: 'snapshot', pairs, risk, cfg, overrides, forward, events: events.slice(-60), poNow: poNow(),
     manual: [...manual.values()].map(({ cand, expiresAt }) => ({ id: cand.id, asset: cand.asset, dir: cand.dir, setup: cand.setupName || cand.setup, deep: cand.deep, expiresAt, evidenceAgainst: cand.evidenceAgainst })),
     queue: [...batches.values()].flatMap((b) => b.cands.map((c) => ({ asset: c.asset, dir: c.dir, deep: c.deep, setup: c.setupName }))),
-    pending: pending.size, tabs: tabs.size, lastExec, calStatus,
+    pending: pending.size, tabs: tabs.size, lastExec, calStatus, calMeta: calTables ? { version: calTables.version, builtAt: calTables.builtAt, meta: calTables.meta } : null,
     tabsInfo: [...tabs.entries()].map(([tabId, t]) => ({ tabId, chartAsset: t.chartAsset, engine: t.engine, running: t.running, armed: t.armed, switching: !!t.switching, openTrades: t.openTrades || [] })), discTracked: discDefs.map((d) => ({ id: d.id, status: d.status, type: d.type })) };
   for (const d of dashes) try { d.postMessage(msg); } catch (_) {}
 }

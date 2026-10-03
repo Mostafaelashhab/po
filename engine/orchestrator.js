@@ -12,8 +12,8 @@
   function rank(cands, cfg, nowSec, perf = () => null) {
     return cands.map((c) => {
       const cal = c.cal;
-      // measured calibrated confidence when there is one, else the engine's deep score; measured first
-      const comp = { confidence: cal?.measured ? cal.p : c.deep, measured: cal?.measured ? 10 : 0, payout: c.payout != null ? Math.round((c.payout - 92) / 2) : 0 };
+      // measured evidence first: expected value (per stake ×100) when measured, else the engine's raw score
+      const comp = { confidence: cal?.measured ? Math.round(50 + 100 * (cal.ev ?? 0)) : c.deep, measured: cal?.measured ? 10 : 0, payout: c.payout != null ? Math.round((c.payout - 92) / 2) : 0 };
       if (cal) {
         comp.sample = cal.oos ? Math.round(Math.min(10, Math.log2(cal.oos.n / 30 + 1) * 4)) : 0;
         comp.stability = cal.stable === false ? -15 : 0;

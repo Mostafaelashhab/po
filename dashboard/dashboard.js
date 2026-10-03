@@ -87,7 +87,7 @@ function horizons() {
 const FRAME_OPTS = [['5', 'تحليلات فريم 5 ثوانٍ'], ['10', 'تحليلات فريم 10 ثوانٍ'], ['15', 'تحليلات فريم 15 ثانية'], ['30', 'تحليلات فريم 30 ثانية'], ['60', 'تحليلات فريم الدقيقة'], ['300', 'تحليلات فريم 5 دقائق'], ['900', 'تحليلات فريم 15 دقيقة'], ['opp', 'الفرص (دخول فعلي أو ميل)']];
 
 function render() {
-  const fn = { live: renderLive, log: renderLog, stats: renderStats, matrix: renderMatrix, validation: renderValidation, research: renderResearch, discovery: renderDiscovery, settings: renderSettings }[S.view];
+  const fn = { live: renderLive, opps: renderOpps, log: renderLog, stats: renderStats, matrix: renderMatrix, validation: renderValidation, research: renderResearch, discovery: renderDiscovery, settings: renderSettings }[S.view];
   Promise.resolve(fn()).catch((err) => { $(`#view-${S.view}`).innerHTML = `<p class="bad">خطأ: ${e(err.message)}</p>`; console.error(err); });
 }
 
@@ -99,10 +99,98 @@ function calHtml(s) {
   const [cls, txt] = ST[c.status] || ST.COLLECTING;
   const label = (r) => (r.lo == null ? 'لم تُقَس (بلا تاريخ)' : `${r.lo}–${Math.min(100, r.hi)}%`);
   return `<h2>شروط الدخول ونموذج الثقة <span class="${cls}" style="font-size:.8em">${txt}</span></h2>
-    <p class="note">لا دخول على زوج نسبة ربحه أقل من ${g.minPayout ?? 92}%. الثقة المعايرة = احتمال أن نوع الفرصة يتفوق على نقطة التعادل، من نتائج فرص مشابهة خارج العينة؛ تمنع الدخول فقط عندما تُقاس وتكون أقل من ${g.minConfidence ?? 50}%. الجدول يقارن الثقة عند الدخول بما حدث فعلًا؛ إذا لم تتفوق الفرص التي سمح بها النموذج على نقطة التعادل (بعد ${g.monitorMinN ?? 30} فرصة) يُرفض ويتوقف التداول.</p>
-    <div class="tablewrap"><table><tr><th>الثقة عند الدخول</th><th class="n">العدد</th><th class="n">نسبة النجاح الفعلية</th><th class="n">نطاق 90%</th><th class="n">التعادل</th></tr>
-    ${(c.rows || []).map((r) => `<tr><td>${label(r)}</td><td class="n">${r.n}</td><td class="n ${r.n >= 30 ? (r.ci[0] >= r.be ? 'ok' : r.ci[1] < r.be ? 'bad' : '') : 'dim'}">${pct(r.wr)}</td>
-      <td class="n dim">${r.n ? `${f1(r.ci[0])}–${f1(r.ci[1])}` : '–'}</td><td class="n dim">${f1(r.be)}%</td></tr>`).join('') || '<tr><td colspan="5" class="dim">لا توجد فرص منتهية بعد.</td></tr>'}</table></div>`;
+    <p class="note">لا دخول على زوج نسبة ربحه أقل من ${g.minPayout ?? 92}%. لا يوجد رقم ثابت للثقة: احتمال الفوز يُقدَّر من نتائج فرص مشابهة خارج العينة (مع النطاق وحجم العينة)، ولا دخول إلا إذا كان الربح المتوقع موجبًا والنتائج مستقرة؛ بلا بيانات كافية تُعتبر "غير مؤكدة" (تجريبي فقط). الجدول يقارن الاحتمال المقدَّر بما حدث فعلًا (خطأ المعايرة ${c.calibrationError != null ? c.calibrationError + ' نقطة' : 'غير متاح بعد'})؛ إذا لم تتفوق الفرص التي سمح بها النموذج على نقطة التعادل (بعد ${g.monitorMinN ?? 30} فرصة) يُرفض ويتوقف التداول.</p>
+    <div class="tablewrap"><table><tr><th>احتمال الفوز المقدَّر</th><th class="n">العدد</th><th class="n">المتوسط المقدَّر</th><th class="n">نسبة النجاح الفعلية</th><th class="n">نطاق 90%</th><th class="n">التعادل</th></tr>
+    ${(c.rows || []).map((r) => `<tr><td>${label(r)}</td><td class="n">${r.n}</td><td class="n dim">${r.predicted != null ? pct(r.predicted) : '–'}</td><td class="n ${r.n >= 30 ? (r.ci[0] >= r.be ? 'ok' : r.ci[1] < r.be ? 'bad' : '') : 'dim'}">${pct(r.wr)}</td>
+      <td class="n dim">${r.n ? `${f1(r.ci[0])}–${f1(r.ci[1])}` : '–'}</td><td class="n dim">${f1(r.be)}%</td></tr>`).join('') || '<tr><td colspan="6" class="dim">لا توجد فرص منتهية بعد.</td></tr>'}</table></div>`;
+}
+
+// ── OPPORTUNITIES (research metrics) ────────────────────────────────────────
+// Every opportunity that reached its entry moment (entered or gated) is judged on its own direction and
+// duration — the ANALYSIS. What happened when the system tried to place it is the EXECUTION, measured
+// apart: an analysis can be right and its execution fail. Baselines show whether the analysis adds anything.
+const OPP_DIMS = {
+  setup: ['الاستراتيجية', (r) => r.setup], frame: ['الفريم', (r) => r.frame], regime: ['حالة السوق', (r) => r.regime], asset: ['الزوج', (r) => r.asset],
+  lean: ['الاتجاه', (r) => r.lean], kind: ['نوع الفرصة', (r) => r.setupKind || r.facts?.kind], expiry: ['المدة', (r) => r.expirySec],
+  data: ['حالة البيانات', (r) => (r.cal?.measured ? 'مقاسة' : 'غير كافية')], entry: ['توقيت الدخول', (r) => r.why], day: ['اليوم', (r) => new Date(r.ts * 1000).toISOString().slice(0, 10)],
+};
+const outcomeAt = (r, dir) => OTC.Stats.outcome(r, dir, r.expirySec / (r.tf || 60));
+function tally(items) { // items: [{ out, payout }]
+  let w = 0, l = 0, t = 0, pay = 0, ps = [];
+  for (const it of items) { if (it.out === 'W') { w++; pay += (it.payout ?? 85) / 100; } else if (it.out === 'L') l++; else if (it.out === 'T') t++; ps.push(it.payout ?? 85); }
+  const n = w + l, ci = OTC.Stats.wilson(w, n);
+  return { n, w, l, t, wr: n ? (100 * w) / n : null, lo: ci.lo, hi: ci.hi, ev: items.length ? (pay - l) / items.length : null, be: OTC.U.breakEven(ps.length ? OTC.U.mean(ps) : 85) };
+}
+const tallyRow = (label, x) => `<tr><td>${label}</td><td class="n">${x.n}</td><td class="n">${x.w}</td><td class="n">${x.l}</td>
+  <td class="n ${x.n >= 30 ? (x.lo >= x.be ? 'ok' : x.wr < x.be ? 'bad' : '') : 'dim'}">${pct(x.wr)}</td><td class="n dim">${x.n ? `${f1(x.lo)}–${f1(x.hi)}` : '–'}</td>
+  <td class="n ${x.ev > 0 ? 'ok' : x.ev < 0 ? 'bad' : ''}">${f1(x.ev, 3)}</td><td class="n dim">${f1(x.be)}%</td></tr>`;
+const TALLY_HEAD2 = '<th class="n">العدد</th><th class="n">نجاح</th><th class="n">خسارة</th><th class="n">نسبة النجاح</th><th class="n">نطاق 90%</th><th class="n">العائد/صفقة</th><th class="n">التعادل</th>';
+const STATE_AR = { ENTERED: 'دخلت', GATED: 'لم تجتز الشروط', MISSED_ENTRY: 'فاتت', INVALIDATED: 'أُلغيت', EXPIRED: 'انتهت' };
+const EXEC_AR = { EXECUTED: 'نُفّذت', EXECUTION_FAILED: 'فشل التنفيذ', SHADOW: 'زوج غير مفتوح (ظل)', PROTECTION_BLOCKED: 'منعتها الحماية', GATED: 'رفضها فحص الخلفية',
+  PAPER: 'ورقية', ALERT: 'تنبيه', AWAITING_CONFIRMATION: 'بانتظار تأكيد', NOT_CONFIRMED: 'لم تُؤكَّد', SENT: 'أُرسلت', RESEARCH_ONLY: 'بحث فقط (حساب حقيقي بلا بيانات)' };
+
+async function renderOpps() {
+  const el = $('#view-opps');
+  const all = (await loadRecords()).filter((r) => r.kind === 'opp' && r.source === 'live');
+  if (!all.length) { el.innerHTML = '<p class="muted">لا توجد فرص مسجلة بعد.</p>'; return; }
+  const dim = S.opt.oppDim || 'setup';
+  const count = (xs, f) => { const m = {}; for (const x of xs) { const k = f(x); if (k == null) continue; m[k] = (m[k] || 0) + 1; } return Object.entries(m).sort((a, b) => b[1] - a[1]); };
+  const list = (pairs, label = (k) => k) => pairs.map(([k, v]) => `<span class="pill">${e(label(k))}: ${v}</span>`).join(' ') || '<span class="dim">–</span>';
+  // the analysis: entries and gated entries, on their own direction and duration
+  const reached = all.filter((r) => r.expirySec && r.path?.some((s) => s === 'ENTERED' || s === 'GATED'));
+  const judged = reached.map((r) => ({ r, out: outcomeAt(r, r.lean) })).filter((x) => x.out);
+  const groups = {};
+  for (const x of judged) { const k = OPP_DIMS[dim][1](x.r) ?? '–'; (groups[k] ||= []).push({ out: x.out, payout: x.r.payout }); }
+  const label = (k) => (dim === 'setup' ? sname(k) : dim === 'regime' ? AR.regime(k) : dim === 'asset' ? pair(k) : dim === 'frame' ? AR.frame(+k) : dim === 'expiry' ? AR.duration(+k)
+    : dim === 'lean' ? dw(k) : dim === 'kind' ? AR.kind(k) : dim === 'entry' ? (AR.ENTRY_WHY[k] || k) : k);
+  // the execution, apart
+  const exec = all.filter((r) => r.execState);
+  const executed = all.filter((r) => r.execState === 'EXECUTED' && r.exec?.result);
+  const failedButRight = all.filter((r) => r.execState === 'EXECUTION_FAILED' && outcomeAt(r, r.lean) === 'W').length;
+  // baselines on the same judged entries
+  const base = (f) => tally(judged.map((x) => ({ out: (() => { const d = f(x.r); return d ? outcomeAt(x.r, d) : null; })(), payout: x.r.payout })).filter((y) => y.out));
+  const ctxTrend = (r) => { const t = r.facts?.trend?.[r.roles?.context ?? r.frames?.mid]; return t === 'UP' ? 'CALL' : t === 'DOWN' ? 'PUT' : null; };
+  const randomEv = (() => { const ps = judged.map((x) => x.r.payout ?? 85); const p = ps.length ? OTC.U.mean(ps) : 85; return 0.5 * p / 100 - 0.5; })();
+  // research-record baselines (one candle of the setup frame): previous candle, platform signal, the engine's lean
+  const setups = (await loadRecords()).filter((r) => r.kind !== 'opp' && r.source === 'live' && r.status === 'resolved');
+  const oneCandle = (f) => tally(setups.map((r) => { const d = f(r); return d ? { out: OTC.Stats.outcome(r, d, 1), payout: r.payout } : null; }).filter((y) => y?.out));
+  const prevCandle = (r) => { const c = r.snapshot?.[r.snapshot.length - 1]; return c ? (c[4] > c[1] ? 'CALL' : c[4] < c[1] ? 'PUT' : null) : null; };
+  const cm = S.snap?.calMeta;
+  el.innerHTML = `
+    <h2>جودة الفرص</h2>
+    <div class="detail">حالة الفرص: ${list(count(all, (r) => r.state), (k) => STATE_AR[k] || k)}
+لماذا لم تجتز الشروط: ${list(count(all.filter((r) => r.state === 'GATED').flatMap((r) => r.cal?.blocks || []).map((b) => ({ b })), (x) => x.b), (k) => AR.BLOCK[k] || k)}
+حالة البيانات عند لحظة الدخول: ${list(count(reached, (r) => (r.cal?.measured ? 'مقاسة' : 'غير كافية')))}</div>
+
+    <h2>أداء التحليل <span class="dim" style="font-size:.7em">(كل فرصة على اتجاهها ومدتها، دخلت أو لم تجتز الشروط)</span></h2>
+    <div class="row"><label>التقسيم<select id="oppDim">${Object.entries(OPP_DIMS).map(([k, [l]]) => `<option value="${k}" ${k === dim ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+      <span class="dim">${judged.length} فرصة محسومة من ${reached.length}</span></div>
+    <div class="tablewrap"><table><tr><th>${OPP_DIMS[dim][0]}</th>${TALLY_HEAD2}</tr>
+      ${tallyRow('<b>الكل</b>', tally(judged.map((x) => ({ out: x.out, payout: x.r.payout }))))}
+      ${Object.entries(groups).sort((a, b) => b[1].length - a[1].length).slice(0, 40).map(([k, v]) => tallyRow(e(label(k)), tally(v))).join('')}</table></div>
+    <p class="note">العدد أقل من 30 = رمادي: لا حكم. النطاق 90% فوق نقطة التعادل = أخضر.</p>
+
+    <h2>أداء التنفيذ <span class="dim" style="font-size:.7em">(منفصل عن التحليل)</span></h2>
+    <div class="detail">حالة التنفيذ: ${list(count(exec, (r) => r.execState), (k) => EXEC_AR[k] || k)}
+أسباب فشل التنفيذ: ${list(count(all.filter((r) => r.execState === 'EXECUTION_FAILED'), (r) => String(r.execDetail || r.exec?.reason || '–').replace(/[-\d.]+/g, '#').slice(0, 60)))}
+أسباب منع الحماية: ${list(count(all.filter((r) => r.execState === 'PROTECTION_BLOCKED').flatMap((r) => (r.execDetail || r.exec?.flags || []).map((f) => ({ f }))), (x) => x.f), (k) => AR.RISK_FLAG[k] || k)}
+تحليل صحيح لكن التنفيذ فشل: ${failedButRight}</div>
+    <div class="tablewrap"><table><tr><th>صفقات نُفّذت فعلًا</th>${TALLY_HEAD2}</tr>${tallyRow('النتيجة الفعلية من المنصة', tally(executed.map((r) => ({ out: r.exec.result, payout: r.payout }))))}</table></div>
+
+    <h2>خطوط الأساس <span class="dim" style="font-size:.7em">(هل يضيف التحليل قيمة؟ على نفس الفرص المحسومة)</span></h2>
+    <div class="tablewrap"><table><tr><th>القاعدة</th>${TALLY_HEAD2}</tr>
+      ${tallyRow('<b>النظام</b> (اتجاه الفرصة)', base((r) => r.lean))}
+      ${tallyRow('العكس تمامًا', base((r) => OTC.U.opp(r.lean)))}
+      ${tallyRow('شراء دائمًا', base(() => 'CALL'))}${tallyRow('بيع دائمًا', base(() => 'PUT'))}
+      ${tallyRow('مع اتجاه فريم السياق', base(ctxTrend))}
+      <tr><td>اتجاه عشوائي (متوقع)</td><td class="n dim">–</td><td class="n dim">–</td><td class="n dim">–</td><td class="n">50.0%</td><td class="n dim">–</td><td class="n ${randomEv > 0 ? 'ok' : 'bad'}">${f1(randomEv, 3)}</td><td></td></tr>
+      <tr><th colspan="8" style="text-align:right">على سجلات التحليل (شمعة واحدة من فريم الفرصة)</th></tr>
+      ${tallyRow('ميل المحرك', oneCandle((r) => r.lean))}${tallyRow('اتجاه الشمعة السابقة', oneCandle(prevCandle))}${tallyRow('إشارة المنصة', oneCandle((r) => r.ind?.signal || null))}</table></div>
+
+    <h2>المعايرة</h2>
+    <div class="detail">إصدار النموذج: ${e(cm?.version || '–')}${cm?.meta ? ` · بُني من ${cm.meta.members} نتيجة (${cm.meta.from ? time(cm.meta.from) : '–'} → ${cm.meta.to ? time(cm.meta.to) : '–'}) · مجموعات: ${cm.meta.cohorts.entries} فرص + ${cm.meta.cohorts.setups} تحليلات · الجزء الأقدم ${Math.round(cm.meta.selFraction * 100)}% للاختيار، الأحدث للقياس` : ''}</div>
+    ${calHtml(S.snap || { cfg: OTC.DEFAULT_CONFIG })}`;
+  $('#oppDim').onchange = (ev) => { S.opt.oppDim = ev.target.value; renderOpps(); };
 }
 
 // ── LIVE ─────────────────────────────────────────────────────────────────────
@@ -157,7 +245,7 @@ function renderLive() {
 أسباب حالة السوق: ${e((p.regime?.reasons || []).join('؛ ') || '–')}
 الفريمات: ${Object.entries(p.frames || {}).map(([tf, x]) => `${AR.frame(+tf)}: ${x.decision && x.decision !== 'SKIP' ? dw(x.decision) : x.lean ? `(${dw(x.lean)})` : '–'}${x.watch ? ` [${AR.OPP_STATE[x.watch.state]}]` : ''}`).join(' · ') || '–'}
 ${p.opp ? `الفرصة: ${AR.OPP_STATE[p.opp.state] || p.opp.state} ${dw(p.opp.dir)} · ${e(AR.framesText(p.opp))}${p.opp.why ? ` · ${e(AR.ENTRY_WHY[p.opp.why] || AR.endWhy(p.opp.why))}` : ''}${p.opp.expiry ? ` · المدة ${e(AR.duration(p.opp.expiry.sec))} (${e(AR.expiryWhy(p.opp.expiry))})` : ''}\n` : ''}قابلية القراءة: ${Object.entries(p.frames || {}).map(([tf, x]) => `${AR.frame(+tf)} ${x.quality ?? '–'}${x.usable ? '' : ' (غير واضح)'}${x.roles ? ` [سياق ${AR.frame(x.roles.MID)}${x.roles.TIMING ? `، تأكيد ${AR.frame(x.roles.TIMING)}` : ''}]` : ''}`).join(' · ') || '–'}${p.scanned ? ' · زوج ممسوح من التاريخ (بدون شارت)' : ''}
-${p.opp?.cal ? `الثقة المعايرة: ${e(AR.calText(p.opp.cal))}${p.opp.cal.level ? ` · المجموعة: ${e(p.opp.cal.level)}${p.opp.cal.oos ? `، ${p.opp.cal.oos.wr}% خارج العينة` : ''}` : ''}${p.opp.cal.blocks?.length ? ` · ${e(AR.blockText(p.opp.cal))}` : ''}\n` : ''}آخر تحليل (${AR.frame(L.tf || 300)}): ${e(dw(L.decision))} عند ${time(L.candleTime)}${L.facts && L.decision === 'SKIP' ? ` — ${e(AR.skipReason(L.facts))}` : ''}${L.skipReasons?.length ? '\nأسباب تقنية للانتظار:\n  ' + L.skipReasons.map(e).join('\n  ') : ''}
+${p.opp?.cal ? `التقدير من البيانات: ${e(AR.calText(p.opp.cal))}${p.opp.cal.level ? ` · المجموعة: ${e(p.opp.cal.level)}${p.opp.cal.oos ? `، ${p.opp.cal.oos.wr}% خارج العينة` : ''}` : ''}${p.opp.cal.blocks?.length ? ` · ${e(AR.blockText(p.opp.cal))}` : ''}\n` : ''}آخر تحليل (${AR.frame(L.tf || 300)}): ${e(dw(L.decision))} عند ${time(L.candleTime)}${L.facts && L.decision === 'SKIP' ? ` — ${e(AR.skipReason(L.facts))}` : ''}${L.skipReasons?.length ? '\nأسباب تقنية للانتظار:\n  ' + L.skipReasons.map(e).join('\n  ') : ''}
 ضد الفكرة (تقني):\n  ${(L.evidenceAgainst || []).map(e).join('\n  ') || '–'}${p.error ? `\nخطأ: ${e(p.error)}` : ''}</div></td></tr>`;
       }).join('') || '<tr><td colspan="11" class="muted">لا توجد أزواج بعد. افتح Pocket Option على زوج OTC، وكل تبويب يضيف الأزواج التي يستقبل أسعارها.</td></tr>'}
     </table></div>

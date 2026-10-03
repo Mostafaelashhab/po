@@ -77,6 +77,7 @@
   const BLOCK = {
     payout: 'نسبة الربح أقل من المطلوب', payout_unknown: 'نسبة الربح غير معروفة',
     confidence: 'النتائج السابقة لفرص مشابهة لم تتفوق على نقطة التعادل', no_history: 'لا توجد صفقات مشابهة كافية لحساب الثقة بعد',
+    no_edge: 'نتائج الفرص المشابهة لا تعطي ربحًا متوقعًا عند نسبة الربح الحالية', insufficient_data: 'لا توجد بيانات تاريخية كافية للحكم عليها',
     no_history_at_duration: 'لا توجد نتائج كافية بهذه المدة', unstable: 'نتائج الفرص المشابهة غير مستقرة عبر الزمن',
     contradiction: 'يوجد تعارض قوي', risk_high: 'المخاطر مرتفعة', data: 'بيانات الزوج غير مكتملة', copy_against: 'إشارات النسخ عكس الفكرة',
     model_rejected: 'نموذج الثقة مرفوض: الفرص التي سمح بها لم تتفوق على نقطة التعادل',
@@ -86,10 +87,13 @@
     if (b === 'payout') return `نسبة الربح ${cal.payout}% — المطلوب ${cal.minPayout ?? 92}% أو أكثر`;
     return BLOCK[b] || '';
   }
+  // Estimated win probability from similar past opportunities (out-of-sample), or "not established".
   function calText(cal) {
     if (!cal) return null;
-    if (!cal.measured && cal.reason !== 'measured' && cal.reason !== 'unstable') return 'لم تُقَس بعد (لا توجد نتائج سابقة كافية)';
-    return `${Math.round(cal.p)}%${cal.oos ? ` من ${Math.round(cal.oos.n)} فرصة مشابهة` : ''}`;
+    if (!cal.measured && cal.reason !== 'measured' && cal.reason !== 'unstable') return 'غير مؤكدة: لا توجد بيانات تاريخية كافية للحكم عليها';
+    if (cal.winProb == null) return `${Math.round(cal.p)}%${cal.oos ? ` من ${Math.round(cal.oos.n)} فرصة مشابهة` : ''}`; // older records
+    const iv = cal.interval ? ` (${Math.round(cal.interval[0])}–${Math.round(cal.interval[1])}%)` : '';
+    return `احتمال الفوز ${Math.round(cal.winProb)}%${iv} من ${Math.round(cal.n || cal.oos?.n || 0)} فرصة مشابهة${cal.stable === false ? ' — غير مستقر' : ''}`;
   }
   const payoutText = (cal) => (cal?.payout != null ? `${cal.payout}%` : null);
   const MODEL = { COLLECTING: 'يجمع النتائج', OK: 'سليم حتى الآن', CONFIRMED: 'مؤكَّد بالنتائج', REJECTED: 'مرفوض — التداول متوقف' };
@@ -127,7 +131,7 @@
       // Below the calibrated confidence gate (or another final check): not an opportunity to act on.
       if (o.cal && !o.cal.qualified && (o.state === 'GATED' || !['MISSED_ENTRY', 'INVALIDATED', 'EXPIRED', 'ENTERED'].includes(o.state))) {
         row('أقرب فرصة', `${DIR[o.dir]} · ${KIND[o.kind] || 'فرصة'} · فريم ${frame(o.tf)}`);
-        row('نسبة الربح', payoutText(o.cal)); row('الثقة المعايرة', calText(o.cal)); row('السبب', blockText(o.cal));
+        row('نسبة الربح', payoutText(o.cal)); row('التقدير من البيانات', calText(o.cal)); row('السبب', blockText(o.cal));
         return { key: 'below', ...STATUS.below, verdict: 'SKIP', dir: o.dir, title: 'لا توجد فرصة مؤهلة', rows, timer: null, facts: f, p: o.cal.p };
       }
       if (o.state === 'ENTERED' && o.entry) {
@@ -135,7 +139,7 @@
         if (left > 0 || end > 0) {
           row('التوقيت', ENTRY_WHY[o.entry.why] || 'عند إغلاق الشمعة');
           row('المدة', o.expiry ? `${duration(o.expiry.sec)} — ${expiryWhy(o.expiry)}` : null);
-          row('الفريم', framesText(o)); row('نوع الفرصة', KIND[o.kind] || 'فرصة'); row('نسبة الربح', payoutText(o.cal)); row('الثقة المعايرة', calText(o.cal)); row('إشارات النسخ', copyText(o.copy || f.copy));
+          row('الفريم', framesText(o)); row('نوع الفرصة', KIND[o.kind] || 'فرصة'); row('نسبة الربح', payoutText(o.cal)); row('التقدير من البيانات', calText(o.cal)); row('إشارات النسخ', copyText(o.copy || f.copy));
           // what the system really did with it, when known — never a bare "enter now" for an entry it won't place
           const act = actionText(o.action);
           if (act && !act.live) {
@@ -150,7 +154,7 @@
       } else if (['WAIT_FOR_CONFIRMATION', 'WAIT_FOR_RETEST', 'WAIT_FOR_REJECTION', 'CONFIRMED'].includes(o.state)) {
         const w = waitFor(o);
         row('ننتظر', w?.what); row('ما يؤكدها', w?.confirm); row('الفريم', framesText(o)); row('نوع الفرصة', KIND[o.kind] || 'فرصة');
-        row('نسبة الربح', payoutText(o.cal)); row('الثقة المعايرة', calText(o.cal)); row('إشارات النسخ', copyText(o.copy || f.copy));
+        row('نسبة الربح', payoutText(o.cal)); row('التقدير من البيانات', calText(o.cal)); row('إشارات النسخ', copyText(o.copy || f.copy));
         return { key: 'wait', ...STATUS.wait, label: OPP_STATE[o.state], verdict: 'WAIT', dir: o.dir, title: OPP_STATE[o.state], rows,
           timer: { label: 'تنتهي صلاحيتها خلال', sec: o.expiresAt - nowSec }, facts: f };
       } else if (['MISSED_ENTRY', 'INVALIDATED', 'EXPIRED'].includes(o.state)) {

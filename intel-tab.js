@@ -179,22 +179,24 @@
     return OTC.CopyTrade.evaluate(hist, { now: nowTs, price: F?.feed.lastTick?.price ?? null, atr: F ? atrOf(F, 60) : null });
   }
 
+  // A platform signal counts only once the bot's own measurements show it predicts something: at least
+  // 100 measured cases for that horizon and code, and the lower bound (90%) of the measured hit rate above
+  // 50% in one direction — which also gives its direction, whatever the code was guessed to mean.
+  // Unproven codes are still measured (bot.js), just not used.
+  const SIGNAL_MIN_N = 100;
   function signalFor(asset, nowTs) {
     const slot = poSig.byAsset[asset];
     if (slot) {
       for (const min of SIGNAL_MINUTES) {
         const x = slot[min];
         if (!x || x.code <= 0 || x.changedAt == null || nowTs - x.changedAt > 60) continue;
-        const dir = CODE_DIR[x.code]?.toUpperCase();
-        if (!dir) continue;
-        // The meaning of PO's codes is undocumented: trust it only as far as the bot's own measurements go.
         const st = sigStats[`*|${min}|${x.code}`], n = st ? st.up + st.down : 0;
-        if (n >= 100) {
-          const up = (st.up / n) * 100;
-          if ((dir === 'CALL') !== (up >= 50)) return { dir: null, source: 'PO signal', note: 'measured lean disagrees with code — ignored' };
-          return { dir, source: `PO signal ${min}m code ${x.code}`, confidence: 55 + Math.min(15, Math.abs(up - 50)), note: `measured ${Math.round(Math.max(up, 100 - up))}% of ${n}` };
-        }
-        return { dir, source: `PO signal ${min}m code ${x.code}`, confidence: 52, note: 'code meaning not yet verified' };
+        if (n < SIGNAL_MIN_N) continue;
+        const upLo = OTC.Stats.wilson(st.up, n).lo, downLo = OTC.Stats.wilson(st.down, n).lo;
+        const dir = upLo > 50 ? 'CALL' : downLo > 50 ? 'PUT' : null;
+        if (!dir) continue;
+        const lo = Math.max(upLo, downLo);
+        return { dir, source: `PO signal ${min}m code ${x.code}`, confidence: Math.round(Math.min(65, lo + 5)), note: `measured ${Math.round((100 * (dir === 'CALL' ? st.up : st.down)) / n)}% of ${n}` };
       }
     }
     // Copy trades: agreement, freshness, before/after the move — never "most copies say CALL".
@@ -331,6 +333,7 @@
       strategies: record?.strategies || [], disc: record?.disc, evidenceFor: a.evidenceFor.slice(0, 8), evidenceAgainst: a.evidenceAgainst.slice(0, 8),
       risk: a.risk || null, recordId: record?.id || null, payout: payoutOf(asset), copy: facts.copy || null,
       hard: a.contradiction?.hard || [], dqOk: res.dq?.ok !== false, frameQuality: F.q?.[tf]?.score ?? null, scanned: !!F.polled,
+      signal: X.signal ? { dir: X.signal.dir ?? null, source: X.signal.source, confidence: X.signal.confidence ?? null } : null,
     };
     spec.cal = qualify(spec);
     const { opp, enter } = Opp.create(spec, cfg, tick.ts);
@@ -375,16 +378,16 @@
     else if (payout < g.minPayout) blocks.push('payout');
     const cal = OTC.Calibration.assess({ frame: o.tf, setup: o.setup, kind: o.kind, dir: o.dir, regime: o.regime, asset: o.asset, payout: payout ?? 85 },
       calTables, { cfg, available: availableFor(o.asset), expiryOpts: { f: { volatility: { state: o.vol }, momentum: { accel: o.accel } }, levelAtr: o.levelAtr } });
-    const measured = cal.reason === 'measured' || cal.reason === 'unstable';
-    if (measured && cal.p < g.minConfidence) blocks.push('confidence');
-    if (!measured && g.requireHistory) blocks.push(cal.reason);
-    if (cal.stable === false) blocks.push('unstable');
+    const measured = cal.measured;
+    if (measured && !(cal.ev > 0)) blocks.push('no_edge');           // the data says this kind of setup loses money at this payout
+    if (measured && cal.stable === false) blocks.push('unstable');   // …or worked only in part of the time
+    if (!measured && g.requireHistory) blocks.push('insufficient_data');
     if (o.hard?.length) blocks.push('contradiction');
     if (o.risk === 'HIGH') blocks.push('risk_high');
     if (o.dqOk === false) blocks.push('data');
     if (o.copy?.dir && !o.copy.agree && !o.copy.late) blocks.push('copy_against');
     if (calStatus.status === 'REJECTED') blocks.push('model_rejected');
-    return { ...cal, payout, minPayout: g.minPayout, gate: g.minConfidence, measured, qualified: !blocks.length, blocks: [...new Set(blocks)] };
+    return { ...cal, payout, minPayout: g.minPayout, measured, qualified: !blocks.length, blocks: [...new Set(blocks)] };
   }
 
   // ENTER_NOW: final gate, duration from the calibration, and — if qualified — hand the entry to
@@ -417,8 +420,9 @@
     post({ type: 'decision', record: oppRecord(o), cand: null, poNow: feeds.get(asset)?.feed.lastTick?.ts });
   }
 
-  const calSummary = (c) => (c ? { p: c.p, gate: c.gate, measured: c.measured, payout: c.payout, minPayout: c.minPayout, qualified: c.qualified, blocks: c.blocks,
-    source: c.source, level: c.level, key: c.key, oos: c.oos, stable: c.stable, reason: c.reason } : null);
+  const calSummary = (c) => (c ? { status: c.status, measured: c.measured, winProb: c.winProb, interval: c.interval, ev: c.ev, evLo: c.evLo, p: c.p, n: c.n,
+    payout: c.payout, minPayout: c.minPayout, qualified: c.qualified, blocks: c.blocks, source: c.source, level: c.level, key: c.key, oos: c.oos,
+    stable: c.stable, reason: c.reason, version: c.version } : null);
 
   function oppRecord(o) {
     const reached = (o.state === 'ENTERED' || o.state === 'GATED') && o.entry, entered = o.state === 'ENTERED', t = reached ? o.entry.time : o.closeTime;
@@ -434,6 +438,11 @@
       waitSec: t - o.closeTime, expirySec: reached ? o.expiry.sec : null, expiry: reached ? { source: o.expiry.source, reason: o.expiry.reason } : null,
       entryPrice: reached ? o.entry.price : o.closePrice, invalidation: o.invalidation, copy: o.copy,
       cal: calSummary(o.cal), profile: o.frames, frameQuality: o.frameQuality, scanned: o.scanned,
+      // what the system knew at that moment (rebuildable later): roles of each frame, platform signal, raw score,
+      // durations the platform offered, versions
+      roles: { context: o.frames?.mid ?? null, macro: o.frames?.macro ?? null, setup: o.tf, confirmation: o.timingTf ?? null, entryTiming: reached ? o.entry.tf ?? o.tf : null },
+      signal: o.signal || null, rawScore: o.confidence, availableExpiries: availableFor(o.asset),
+      engineVersion: (() => { try { return chrome.runtime.getManifest().version; } catch (_) { return null; } })(),
       exits: {}, status: 'pending', facts: o.facts, evidenceFor: o.evidenceFor, evidenceAgainst: o.evidenceAgainst, risk: o.risk,
       riskFlags: [], skipReasons: entered ? [] : o.state === 'GATED' ? [`entry gate: ${o.cal?.blocks?.join(', ')}`] : [`opportunity ${o.state.toLowerCase()}`], exec: null, setupRecord: o.recordId,
     };

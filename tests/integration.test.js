@@ -107,7 +107,8 @@ function makeOpp(asset, entryTime, dir, extra = {}) {
 const oppCand = (rec) => ({ id: rec.id, kind: 'opp', asset: rec.asset, dir: rec.decision, candleTime: rec.candleTime, entryTime: rec.ts, entryPrice: 1.08, entryAtr: 0.0004,
   entryTf: 300, validFor: 30, expirySec: rec.expirySec, tf: 900, invalidation: 1.078, deep: rec.deep, setup: rec.setup, setupName: 'Trend Following', regime: rec.regime,
   evidenceAgainst: [], atr: 0.001, strategies: rec.strategies, payout: 92,
-  cal: { p: 96, gate: 50, measured: true, payout: 92, minPayout: 92, qualified: true, blocks: [], source: 'entries', level: 'setup_regime', oos: { w: 100, l: 50, n: 150, wr: 66.7 }, stable: true } });
+  cal: { status: 'MEASURED', measured: true, winProb: 64.2, interval: [57.6, 72.1], ev: 0.23, p: 99, n: 150, payout: 92, minPayout: 92, qualified: true, blocks: [],
+    source: 'entries', level: 'setup_regime', oos: { w: 100, l: 50, n: 150, wr: 66.7 }, stable: true } });
 
 test('worker PAPER: an opportunity entry is paper-traded at its own duration and resolved from 1M closes', async () => {
   const W = await loadWorker(FAST);
@@ -177,13 +178,13 @@ test('worker: past outcomes become cohort tables for the tabs; entries failing t
   assert.equal(saved.exec.action, 'gated');
   assert.equal(saved.decision, 'SKIP');
   assert.ok(saved.skipReasons.some((r) => /payout 90% < 92%/.test(r)));
-  // 92% payout but measured confidence below the minimum
+  // 92% payout but the measured expected value is negative
   const rec2 = makeOpp('EURUSD_otc', T0 + 600, 'CALL');
-  await tab.send({ type: 'decision', record: rec2, cand: { ...oppCand(rec2), cal: { ...oppCand(rec2).cal, p: 40, measured: true } }, poNow: T0 + 602 });
+  await tab.send({ type: 'decision', record: rec2, cand: { ...oppCand(rec2), cal: { ...oppCand(rec2).cal, winProb: 49, ev: -0.06, measured: true } }, poNow: T0 + 602 });
   await wait(60);
   saved = await W.DB.get('records', rec2.id);
   assert.equal(saved.exec.action, 'gated');
-  assert.ok(saved.skipReasons.some((r) => /confidence 40% < 50%/.test(r)));
+  assert.ok(saved.skipReasons.some((r) => /expected value -0.06 ≤ 0/.test(r)), saved.skipReasons.join());
 });
 
 test('worker AUTO: a qualified entry on a pair no armed tab shows is paper-traded and the user is told where it is', async () => {
@@ -277,6 +278,26 @@ test('worker: an entry blocked by the Risk Engine is reported to its tab with th
   const told = tab.sent.filter((m) => m.type === 'oppAction').pop();
   assert.equal(told.action, 'risk');
   assert.ok(told.detail.includes('EMERGENCY'));
+});
+
+test('worker AUTO real account: INSUFFICIENT_DATA is research only, even when the user allows all qualified entries', async () => {
+  const W = await loadWorker({ intelConfig: { execMode: 'AUTO', autoRealAll: true, risk: { batchWindowMs: 20 } } });
+  const tab = W.connectTab(81);
+  await tab.send({ type: 'hello', isDemo: false, chartAsset: 'EURUSD_otc' });
+  const rec = makeOpp('EURUSD_otc', T0, 'CALL');
+  const cand = { ...oppCand(rec), cal: { status: 'INSUFFICIENT_DATA', measured: false, winProb: null, ev: null, qualified: true, blocks: [], payout: 92 } };
+  await tab.send({ type: 'decision', record: rec, cand, poNow: T0 + 2 });
+  await wait(60);
+  assert.ok(!tab.sent.some((m) => m.type === 'execute'), 'never executed on a real account');
+  const saved = await W.DB.get('records', rec.id);
+  assert.equal(saved.execState, 'RESEARCH_ONLY');
+  assert.equal(saved.exec.shadow, true);
+  // measured and positive: executed
+  const rec2 = makeOpp('EURUSD_otc', T0 + 600, 'CALL');
+  await tab.send({ type: 'decision', record: rec2, cand: oppCand(rec2), poNow: T0 + 602 });
+  await wait(60);
+  assert.ok(tab.sent.some((m) => m.type === 'execute' && m.id === rec2.id));
+  assert.equal((await W.DB.get('records', rec2.id)).execState, 'SENT');
 });
 
 test('worker: simultaneous candidates are ranked, the weaker one is skipped by the risk engine', async () => {
@@ -560,7 +581,8 @@ test('content scripts: measured evidence of no edge, or a rejected model, blocks
   const eur = opps.filter((d) => d.record.asset === 'EURUSD_otc' && d.record.state === 'GATED');
   assert.ok(eur.length, 'EURUSD reached entry moments');
   for (const d of eur) {
-    assert.ok(d.record.cal.measured && d.record.cal.p < 50 && d.record.cal.blocks.includes('confidence'), JSON.stringify(d.record.cal));
+    assert.ok(d.record.cal.measured && d.record.cal.ev <= 0 && d.record.cal.winProb < 52 && d.record.cal.blocks.includes('no_edge'), JSON.stringify(d.record.cal));
+    assert.equal(d.record.cal.status, 'MEASURED');
     assert.ok(!d.record.cal.blocks.includes('payout'));
   }
   // a rejected model stops every entry, whatever the tables say

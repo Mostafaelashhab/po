@@ -36,37 +36,34 @@ Service worker: ranks qualified entries across pairs (confidence, sample, stabil
    tab that shows the pair (re-validated before the click) → outcomes from 1M closes
    → cohort tables + confidence monitor → back to the tabs
 ```
-- **Entry gate: payout ≥ 92%** (`gate.minPayout`). No entry — paper or real — on a pair
-  paying less, checked at the entry moment, in the worker, and again before the click.
-  The scanner spends its budget on pairs paying ≥ 92% (`scanner.minPayout`).
-- **Calibrated confidence** (`engine/calibration.js`) = P(this kind of setup's true win
-  rate > break-even), from resolved outcomes of similar past setups: same frame +
-  strategy + direction (+ regime, + pair when there is enough data; else the setup kind).
-  Older 60% of the cohort chooses the duration, newer 40% (out-of-sample) gives the
-  probability, with a sceptical prior of 20 trades at break-even. Indicators agreeing
-  never raise it. It is not a win rate. It **vetoes** an entry only once it has been
-  measured (≥ 30 out-of-sample outcomes) and is below `gate.minConfidence` (50%), or the
-  cohort is unstable (a walk-forward third below break-even). Without history it does
-  not block (set `gate.requireHistory` to make it), so data keeps being collected.
-- **The confidence is checked**: entries it let through on measured evidence are tracked;
-  once 30 have resolved, if their win rate's upper bound is below break-even the model is
-  REJECTED and nothing trades until the numbers recover (dashboard → live → model table).
-- Every opportunity that reaches its entry moment but fails the gate is still logged
-  (GATED) with a duration and measured.
-- **Seconds frames: 5s, 10s, 15s, 30s** (on top of 1M, 5M, 15M; Settings → frames).
-  Only for pairs open on a chart (they need live ticks); scanned pairs use 1M and up.
-  Seeded from PO's 5s history (3 pages ≈ 50 min), 10/15/30s built from it; a few
-  tick-less seconds become flat candles. Context/confirmation: 5s → 30s + 1M, no
-  confirmation · 10s → 30s or 1M + 5M, confirm 5s · 15s → 1M + 5M, confirm 5s ·
-  30s → 1M + 5M, confirm 5s or 10s. Entry windows 3–8 s; their entries are ranked
-  across pairs within 250 ms. Durations can go down to 5 s (if PO offers them for the
-  pair). Seconds-frame analyses are logged only when they decide or scan strong.
-  Execution takes ~1–2 s (expiry picker, amount, click), which matters on these frames:
-  compare paper results with real fills before trusting them.
-- **Outcomes in seconds.** Opportunity records keep exits keyed by seconds after entry
-  (`tf: 1`, horizons 5 s … 30 min; minute-frame entries only ≥ 60 s). The worker
-  resolves them from candle closes keyed by end time: 1M candles, plus 5s candles from
-  pairs on a chart. Older minute-keyed opportunity records are converted on start.
+- **Entry gate: payout ≥ 92%** (`gate.minPayout`), checked at the entry moment, in the worker and
+  before the click. The scanner spends its budget on pairs paying ≥ 92%.
+- **No fixed confidence number.** `engine/calibration.js` estimates, from out-of-sample outcomes of
+  similar past opportunities, a **win probability** (posterior mean with a sceptical prior at
+  break-even, plus a 90% interval and the sample size), the **expected value** per stake at the
+  pair's current payout, and **stability** (walk-forward thirds). "Similar" is a hierarchy: pair +
+  strategy + frame + direction (+ regime) → strategy + frame + direction (+ regime) → strategy
+  family + frame (+ regime) → the frame's whole population; the most specific level with ≥ 30
+  out-of-sample outcomes that is also stable is used. The duration is chosen on the older 60%
+  (train) and locked before the newer 40% is measured. A measured opportunity is entered only if
+  its expected value is positive and its cohort stable. Without enough outcomes it is
+  **INSUFFICIENT_DATA**: no probability is shown or guessed; allowed on demo (to gather data),
+  never on a real account (`gate.requireHistory` blocks it on demo too).
+- **Model monitor**: estimated probabilities vs what happened (calibration error, by bucket); the
+  entries let through on measured evidence must beat break-even, or the model is REJECTED and
+  trading stops. Each table build is versioned (`cal-<time>`) with its data window and sizes, and
+  every decision records the version it used.
+- **Platform signals** count only after ≥ 100 measured cases with the 90% lower bound of the hit
+  rate above 50% (the direction comes from the measurements, not from guessing the code's meaning).
+- **Every opportunity record** keeps what the system knew: frame roles (context / setup /
+  confirmation / entry timing), raw score, estimate (+ version, level, sample, stability), gate
+  blocks, platform signal, durations offered, engine version, PO and UTC times — and one execution
+  state (EXECUTED / EXECUTION_FAILED / SHADOW / PROTECTION_BLOCKED / GATED / PAPER / RESEARCH_ONLY …),
+  kept apart from how the analysis turned out.
+- **Dashboard → الفرص**: opportunity quality, analysis performance by strategy / frame / regime /
+  pair / direction / kind / duration / data status / entry timing / day, execution performance
+  (with "analysis right, execution failed"), baselines (opposite, always CALL/PUT, context-frame
+  trend, random; on research records: previous candle, platform signal), and calibration.
 - **Dynamic frames** (`engine/frameselect.js`). Each frame is scored on trend/structure
   clarity, noise (efficiency ratio), candle quality, volatility and its track record.
   Frames below `frameSelect.minSetupQuality` are analysed and logged but cannot open an

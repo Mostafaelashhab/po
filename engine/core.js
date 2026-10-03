@@ -56,22 +56,20 @@
     autoDemoAll: true,        // AUTO on a demo account: every QUALIFIED entry (true) or promoted profiles only
     autoRealAll: false,       // AUTO on a real account: same choice; the user sets it
     autoSwitch: true,         // AUTO: an armed tab may switch its chart (PO's asset list) to a pair with a qualified opportunity
-    // Entry gate. Nothing is entered (paper or real) on a pair paying less than minPayout.
-    // Calibrated confidence (engine/calibration.js) = P(true win rate > break-even) from
-    // out-of-sample outcomes of similar past setups. It vetoes an entry only when it has been
-    // MEASURED and is below minConfidence (the data says this kind of setup has no edge);
-    // without enough history it does not block, unless requireHistory is on.
+    // Entry gate. No fixed confidence number: nothing is entered (paper or real) on a pair paying
+    // less than minPayout; a MEASURED opportunity is entered only if its expected value at the
+    // current payout is positive and its cohort is stable (engine/calibration.js). Without enough
+    // outcomes it is INSUFFICIENT_DATA: allowed on demo (that is how data is gathered), never on a
+    // real account; with requireHistory on, not even on demo.
     gate: {
       minPayout: 92,          // % — the user's hard requirement
-      minConfidence: 50,      // measured P(edge) below this → no entry
-      requireHistory: false,  // true: no entry until similar setups have enough measured outcomes
+      requireHistory: false,  // true: no entry anywhere until similar setups have enough measured outcomes
       minOOS: 30,             // out-of-sample outcomes needed before a cohort gives a confidence at all
       minTableN: 10,          // smaller cohorts are not sent to the tabs
       selFraction: 0.6,       // older 60% chooses the duration, newer 40% is out-of-sample
       folds: 3, foldMinN: 10, // walk-forward folds: any fold (≥ foldMinN) below break-even → unstable → no entry
-      unstableCap: 90,
       priorStrength: 20,      // sceptical prior: 20 pseudo-trades at exactly break-even
-      monitorMinN: 30,        // measured entries ≥ minConfidence needed before the monitor can confirm or reject the model
+      monitorMinN: 30,        // entries let through on measured evidence needed before the monitor can confirm or reject the model
     },
     // Dynamic timeframe selection (engine/frameselect.js): allowed roles per setup frame.
     frameSelect: {

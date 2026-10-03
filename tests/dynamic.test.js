@@ -190,33 +190,51 @@ test('calibration: cohort tables split old (duration choice) from new (out-of-sa
   assert.equal(t[600].folds.length, 3);
 });
 
-test('calibration: a strong stable edge passes 92%; no edge, a thin sample or an unstable one never does', () => {
+test('calibration: an estimated win probability with interval and expected value — or INSUFFICIENT_DATA, never a guess', () => {
   const A = (recs) => OTC.Calibration.assess(candidate, OTC.Calibration.buildTables(recs, cfg), { cfg });
   const strong = A(cohort(400, 0.72));
+  assert.equal(strong.status, 'MEASURED');
   assert.equal(strong.source, 'entries');
-  assert.ok(strong.p >= 92, JSON.stringify(strong));
+  assert.ok(strong.winProb > 62 && strong.interval[0] < strong.winProb && strong.winProb < strong.interval[1], JSON.stringify(strong));
+  assert.ok(strong.ev > 0 && strong.stable);
   assert.ok([300, 600].includes(strong.expirySec));
-  const none = A(cohort(400, 0.54, { seed: 2 }));
-  assert.ok(none.p < 92, String(none.p));
+  assert.ok(strong.version && /^cal-/.test(strong.version));
+  const none = A(cohort(400, 0.5, { seed: 2 }));
+  assert.ok(none.measured && none.ev <= 0, JSON.stringify({ wp: none.winProb, ev: none.ev }));
   const thin = A(cohort(40, 0.8, { seed: 3 }));
-  assert.equal(thin.p, 0, 'fewer than minOOS out-of-sample outcomes: no confidence at all');
-  assert.equal(thin.reason, 'no_history');
+  assert.equal(thin.status, 'INSUFFICIENT_DATA');
+  assert.equal(thin.winProb, null, 'no probability is invented');
+  assert.equal(thin.ev, null);
+  assert.ok(cfg.expiryChoices.includes(thin.expirySec), 'a duration is still chosen, from the setup');
   // edge only in the first two thirds: the last fold is below break-even
   const decayed = A(cohort(400, 0.8, { seed: 4, flipAfter: 300 }));
   assert.equal(decayed.stable, false);
-  assert.ok(decayed.p <= cfg.gate.unstableCap);
+  assert.equal(decayed.reason, 'unstable');
+});
+
+test('calibration: the most specific cohort that is measured AND stable is used; broader levels fill in', () => {
+  // only 20 entries for this exact pair, but 400 for the strategy on other pairs → pair level is too thin, setup level is used
+  const other = cohort(400, 0.7, { seed: 6 }).map((r) => ({ ...r, asset: 'GBPUSD_otc', id: r.id.replace('EURUSD', 'GBPUSD') }));
+  const mine = cohort(20, 0.7, { seed: 7, from: 1_691_000_000 });
+  const r = OTC.Calibration.assess(candidate, OTC.Calibration.buildTables([...other, ...mine], cfg), { cfg });
+  assert.equal(r.status, 'MEASURED');
+  assert.ok(['setup_regime', 'setup'].includes(r.level), r.level);
+  // a different strategy of the same family on this frame: the family level
+  const fam = OTC.Calibration.assess({ ...candidate, setup: 'ema_pullback' }, OTC.Calibration.buildTables([...other, ...mine], cfg), { cfg });
+  assert.ok(['kind_regime', 'kind', 'frame'].includes(fam.level), fam.level);
 });
 
 test('calibration: monitor rejects the model when entries it let through on measured evidence lose', () => {
   const recs = [];
-  for (let i = 0; i < 60; i++) recs.push({ kind: 'opp', lean: 'CALL', expirySec: 300, path: ['ENTERED'], cal: { p: 75, reason: 'measured' }, entryPrice: 1, payout: 92, exits: { 5: i % 3 ? 0.999 : 1.001 } });
+  for (let i = 0; i < 60; i++) recs.push({ kind: 'opp', tf: 60, lean: 'CALL', expirySec: 300, path: ['ENTERED'], cal: { measured: true, qualified: true, winProb: 62, reason: 'measured' }, entryPrice: 1, payout: 92, exits: { 5: i % 3 ? 0.999 : 1.001 } });
   const m = OTC.Calibration.monitor(recs, cfg);
   assert.equal(m.status, 'REJECTED');
   const ok = OTC.Calibration.monitor(recs.map((r, i) => ({ ...r, exits: { 5: i % 4 ? 1.001 : 0.999 } })), cfg);
   assert.notEqual(ok.status, 'REJECTED');
   assert.equal(OTC.Calibration.monitor(recs.slice(0, 10), cfg).status, 'COLLECTING');
   // entries without measured confidence (cold start) never decide the model's fate
-  const cold = recs.map((r) => ({ ...r, cal: { p: 0, reason: 'no_history' } }));
+  assert.ok(m.calibrationError > 25, 'estimated 62%, happened 33%: a large calibration error');
+  const cold = recs.map((r) => ({ ...r, cal: { measured: false, qualified: true, winProb: null, reason: 'no_history' } }));
   const mc = OTC.Calibration.monitor(cold, cfg);
   assert.equal(mc.status, 'COLLECTING');
   assert.equal(mc.rows[0].n, 60);
