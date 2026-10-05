@@ -43,6 +43,8 @@
   function wrap(def) {
     const st = {
       id: def.id, name: def.name, family: def.family, regimes: def.regimes || [], tags: def.tags || [],
+      // hidden: runs only when a mode names it (cfg.solo); frame / expirySec: where and how long it was tested
+      hidden: !!def.hidden, frame: def.frame ?? null, expirySec: def.expirySec ?? null, source: def.source || null,
       // Both sides; returns the qualifying side's raw evaluation, or null.
       detect(X) {
         const sides = ['CALL', 'PUT'].map((d) => evaluateSide(def, X, d)).filter((r) => r.passed);
@@ -85,17 +87,19 @@
     return st;
   }
 
-  // Runs every registered strategy. Returns all fired strategies; `active` marks the
-  // ones allowed to trade in the current regime. Inactive ones are still logged so
-  // the stats can test whether regime gating actually helps.
-  function runAll(X, { allowedFamilies = null } = {}) {
-    const fired = [], errors = [];
+  // Runs every registered strategy. Returns all fired strategies; `active` marks a clean signal (required
+  // conditions met, no serious objection, score ≥ minStrategyScore) — in any market state: which strategies
+  // work in which state is learned from their record (engine/consensus.js), not fixed by hand.
+  // `regimeFit` still says whether the strategy's author meant it for this state.
+  function runAll(X, { minScore = X?.cfg?.minStrategyScore ?? 60 } = {}) {
+    const fired = [], errors = [], solo = [].concat(X?.cfg?.solo || []).filter((id) => !Array.isArray(X?.cfg?.solo) || !(X.cfg.soloOff || []).includes(id));
     for (const st of registry.values()) {
+      if (st.hidden && !solo.includes(st.id)) continue;
       let out = null;
       // One broken strategy must not take the engine down; its error is reported instead.
       try { out = st.evaluate(X); } catch (e) { if (/required conditions/.test(e.message)) throw e; errors.push(`${st.id}: ${e.message}`); }
       if (!out) continue;
-      out.active = out.valid && out.regimeFit && (!allowedFamilies || allowedFamilies.includes(out.family));
+      out.active = out.valid && out.confidence >= minScore;
       fired.push(out);
     }
     fired.sort((a, b) => b.confidence - a.confidence);
@@ -170,5 +174,5 @@
     },
   };
 
-  OTC.Strategies = { define, runAll, registry, get: (id) => registry.get(id), list: () => [...registry.values()], H };
+  OTC.Strategies = { define, runAll, registry, get: (id) => registry.get(id), list: () => [...registry.values()].filter((s) => !s.hidden), listAll: () => [...registry.values()], H };
 })(typeof globalThis !== 'undefined' ? globalThis : this);

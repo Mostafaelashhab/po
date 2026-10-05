@@ -33,7 +33,7 @@
         const dq = OTC.DataQuality.checkSnapshot(series, { cfg });
         const X = OTC.Pipeline.buildContext(series, { cfg });
         const scan = OTC.Pipeline.fastScan(X);
-        const a = OTC.Pipeline.deepAnalyze(X, { dq, scan });
+        const a = OTC.Pipeline.deepAnalyze(X, { dq, scan, reliability: null }); // no hindsight: strategy records come from these very candles
         a.riskFlags.push(...flags);
         return OTC.Pipeline.toRecord(X, a, scan, { source: 'backtest', asset, payout });
       });

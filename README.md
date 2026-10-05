@@ -23,11 +23,12 @@ next, and only treats a setup as trustworthy after it holds up on data it never 
 ```
 ALL OTC PAIRS ─ open charts: live ticks · every other OTC pair: scanned from 1M history each minute
    │ per pair: frame readability → setup frames + context/confirmation roles (frameselect)
-   │ each setup frame at its own close: data quality → regime → strategies for that regime
-   │   → copy trades (one evidence module) → confluence → contradictions → research record
-   │ a CALL/PUT on a readable frame → OPPORTUNITY (opportunity): wait for confirmation /
+   │ each setup frame at its own close: data quality → regime → EVERY strategy gives CALL / PUT /
+   │   WAIT / NO_SIGNAL → strategy consensus (families, each strategy weighted by its own record)
+   │   → copy trades (one evidence module) → contradictions → research record
+   │ the families AGREE (≥ 3, none against) on a readable frame → OPPORTUNITY: wait for confirmation /
    │   retest / rejection, or enter at the close; invalidated, missed or expired otherwise
-   │ entry moment → duration + calibrated confidence (calibration + expiry) → payout ≥ 92%,
+   │ entry moment → duration + calibrated confidence (calibration + expiry) → payout ≥ minimum,
    │   no measured lack of edge, no contradiction / data / copy / model block → ENTERED,
    │   else GATED (logged and measured, never traded)
    ▼
@@ -36,8 +37,140 @@ Service worker: ranks qualified entries across pairs (confidence, sample, stabil
    tab that shows the pair (re-validated before the click) → outcomes from 1M closes
    → cohort tables + confidence monitor → back to the tabs
 ```
-- **Entry gate: payout ≥ 92%** (`gate.minPayout`), checked at the entry moment, in the worker and
-  before the click. The scanner spends its budget on pairs paying ≥ 92%.
+- **Historical Intelligence** (v0.13, `engine/research.js`): the research core. A *market state* at each 5s / 1M
+  close is built from candles up to it only — the last 12 returns in units of the pair's own volatility (price
+  level and scale don't matter), range position, volatility now vs before, run, candle shape. *Outcomes* after it
+  (next candle and PO's durations: 15 s, 30 s, 1, 3, 5, 30 min) in σ, with best/worst excursion. *Similarity*:
+  signature buckets + a weighted distance, nearest 50 past states. *Walk-forward*: at time T the library holds only
+  states whose outcomes were known before T; overlapping outcomes (same pair, within one horizon) count once; hit
+  rates per horizon × strength over 4 time folds, against trivial baselines (previous candle, its reverse,
+  3-candle momentum, always up), every cell Benjamini–Hochberg corrected. *OTC DNA*: per pair, what follows a run,
+  a big candle, the range top/bottom, each volatility state, long wicks — corrected across all pairs together.
+  *Discovery*: signature × horizon candidates, direction on the oldest 60%, validation 20%, out-of-sample 20%, time
+  folds, BH → VALIDATED / WALK_FORWARD (holds but below break-even) / REJECTED with the reason. A cycle returns a
+  versioned model (`research` store, last 10 kept): the dashboard runs it (research-worker.js, Advanced → البحث
+  التاريخي; ~13 s on 110k states) and the worker re-runs it every 3 hours once the dataset grew.
+  **Data**: the scan leader tab collects PO's history in the background (`collector`: the 30 best-paying OTC pairs,
+  5s back 48 h, 1M back 72 h; paced by live ticks, not timers — background tabs' timers fire once a minute — and
+  only when PO isn't busy with live needs); 5s candles live one row per pair-hour (`hist5`, 72 h), live chart memory
+  joins it before being pruned. **Live**: at each 5s / 1M close (scanned pairs: 1M) the tab asks the worker what
+  followed similar states; shown as "التاريخ المشابه" with what the test said; an entry (`origin: history`,
+  duration = the tested horizon, immediate) only when that horizon × strength cell is BH-significant, stable over
+  the folds, above break-even at the pair's payout, offered by PO and within the maximum duration; a present unlike
+  anything recorded (beyond the walk-forward's 95th-percentile distance) is ANOMALOUS — shown, never entered.
+  **Result on the user's data (2026-10-04, 54k 5s states / 52k 1M states)**: similarity 49–52% at every horizon,
+  never above the best trivial baseline; 0 of 349 (5s) and 0 of 242 (1M) candidate patterns survived; pooled DNA
+  ≈ 50% everywhere. The prices behave like a random walk at these scales so far — the engine says so, and trades
+  nothing on it, until the data shows otherwise.
+- **Strategy discovery from market states** (v0.14). The existing Strategy Discovery Engine (`engine/discovery*.js`:
+  beam search on the oldest 60% with a complexity penalty and coarse grids, simplification, negative conditions,
+  "do not trade" filters, mutations of earlier finds as new versions; validation with Benjamini–Hochberg FDR,
+  out-of-sample, process walk-forward, robustness to nudged parameters, cross-pair, stability; statuses DISCOVERED →
+  … → PAPER_TEST → WATCHLIST → PROMOTED (human) → DECAYING / RETIRED) now also runs on the canonical research
+  dataset: `OTC.Discovery.datasetFromStates` turns MarketStates into rows of 24 normalized `st.*` features (moves in
+  σ, acceleration, shrinking steps, run, range position, distance to / candles since the range high and low,
+  breakouts and failed breakouts, volatility now / its change, candle range, body, wicks, last-3 sequence, 4-hour
+  block, pair) and outcomes at PO durations (5s rules: 15 s / 30 s / 1 min; 1M rules: 1 / 3 / 5 min). It runs in each
+  research cycle (dashboard, or the worker every 3 hours through an offscreen document so live decisions never
+  wait) and writes into the one strategy registry (versioned rows, run reports with the data fingerprint, splits
+  and config). The pipeline builds the same state live (`X.state`), so a rule means the same thing on history and
+  live: tracked rules (PAPER_TEST / WATCHLIST) are measured in the shadow on records (5s analyses where a rule fired
+  are always recorded, with outcomes at those durations); only PROMOTED ones (your decision) trade, at the rule's own
+  tested duration. Popup → البحث: resume / retire. Tests: the planted behaviour is found (only PUT-after-rises rules
+  pass every stage), a random walk yields none. On the user's data (2026-10-04): 5s — nothing cleared training;
+  1M — 4 candidates, all OVERFIT.
+- **Pocket Option channel strategies** (v0.22): the 35 rules of PO's own "Day Trading Strategies" playlist (SMA 3/5, RSI 7, MACD 5/13/4, Stochastic 5/3/3, PSAR, Bollinger, ADX DI 5, Alligator 13/8/5, ZigZag, OsMA, CCI 14, Momentum, Vortex, Envelopes, ROC, AC, SuperTrend, Fractal, AO, Aroon, Keltner, Bulls/Bears Power, DeMarker, Fractal Chaos Bands, Williams, Ichimoku, STC, BB width, Donchian, reversal, spinning top, tweezer, three methods, breakout) joined the same mode (`po_*` in engine/youtube.js) on 15-second candles with 1-minute trades (the videos give no size or duration). On the user's 185k 15s candles: 49.99% over 405k one-minute trades, best 51.3%.
+- **YouTube strategies mode** (v0.18; panel button "استراتيجيات يوتيوب", `engine/youtube.js`). The 17 rules from the
+  videos the user sent (علاء أيمن, Joker Trading, مختبر التداول, Crypto Club, Mr Candlestick, Katie Tutorials,
+  Трейдинг легко) + the Keltner trend pullback, each with the frame and duration its video gives (5s/15s/30s/1M/10M;
+  15 s … 30 min, PO presets). They are `hidden` strategies: never in the normal consensus, run only when the mode names
+  them (`cfg.solo` = the list, `cfg.soloFrames` = their frames). A decision = the set's active signals on the closing
+  frame (each only on its own frame), skipped if they disagree; the trade lasts that strategy's `expirySec`. Real
+  accounts trade each one only once its own record is measured positive (same gate as everything). Backtests on the
+  user's data: 44–53%, break-even 52.08% — expect most of them to stay paper.
+- **Keltner 10-minute mode** (v0.17; panel button "كيلتنر 10د"). A full mode for that one trade: any tab in this mode
+  switches the worker to `solo: 'keltner_trend_pullback'`, `onlyFrame: 600`, max duration ≥ 30 min (the previous
+  settings are saved in `soloPrev` and restored when no tab is in the mode). In solo mode the strategy's own active
+  signal is the decision (no consensus / regime / contradiction / frame-readability filters — the rule exactly as
+  backtested), it enters at the setup close (confidence lifted to `enterNowConfidence`), trades last 30 minutes
+  (`frameExpirySec[600] = 1800`, reason "المدة التي اختُبر عليها فريم 10 دقائق"), copy signals are ignored. The entry
+  gate is unchanged: a real account trades it only once its measured record (≈75 outcomes at 30 min) is positive and
+  stable; until then it is recorded as paper (demo can test it with the demo-test switch).
+- **10-minute frame + Keltner trend pullback** (v0.16). 600 s is a full setup frame (roles MID 30M, MACRO 1H, TIMING
+  1M/5M; fed from ticks, seeded from PO's 10M history; Arabic label "10 دقائق"). It is used when the maximum trade
+  duration allows it (popup: "30د" or "بلا حد"; PO's presets jump from M5 to M30). Tested first on the user's data
+  (5,152 ten-minute candles, 50 pairs, ~3 days): candle behaviour ≈ coin (next up 49.4%, continuation 50–51.9%);
+  54 indicator rules × 10/20/30 min averaged 51.0%, none with a lower bound above break-even. The best ones were
+  re-checked on other views of the same market (10M shifted 5 min, 5M, 15M): all collapsed to ~50% except one — the
+  Keltner trend pullback (5 closes in one half of EMA 20 ± 2 ATR 10, a touch of the middle line closing back), 30-min
+  trades: 57.6% (n 177) / 56.5% / 56.2% / 53.7%. Same 3 days → not independent, and it was picked from ~60 rules, so it
+  is NOT proven. Added to the library as `keltner_trend_pullback` (pure rule, no extra objections); its own record per
+  frame decides whether it ever trades. Features gain `keltner` (last 6 values). Real-market pairs (non-OTC) are now
+  collected while open (`collector.real`, 10 pairs) for the audit's "الأسواق الحقيقية" choice; the live OTC model
+  learns from OTC only.
+- **OTC Randomness & Edge Audit** (v0.15, `engine/audit.js`; Advanced → البحث التاريخي → تدقيق العشوائية). It asks
+  whether the OTC data holds any statistically significant, repeatable, exploitable edge, and it tries to break every
+  apparent one instead of finding one. Data report: pairs, candles, hours, completeness, gaps, duplicates, invalid
+  candles, frozen prices, >10σ jumps, alignment, distribution (skew, kurtosis, tails, up-rate per half). Hypotheses
+  (≈29k on the user's data): autocorrelation of moves / sizes / squared moves (lags 1–60), runs tests (all, per pair,
+  per volatility regime), transition matrices of the last 1–5 directions and "ups in the last 10" at every horizon
+  (5s: 5 s … 5 min; 1M: 1–5 min), behaviour after each move size and after ≥3σ extremes, inside each regime
+  (volatility, trend/range, speed, compression/expansion, quiet/busy hour), time (5s slot in the minute, minute, hour,
+  weekday; the first 5 s of each minute vs the last minute), 1M candle shape, periods A–D, every MarketState feature
+  (bins and mutual information), cross-pair Pearson / Spearman / size correlation at lags 0–10 s both ways plus an
+  out-of-sample lead-lag rule, and from the bot's own records: copy signals by kind, PO's signal codes, engine entries
+  per duration, entering later vs at once, excursion after a placed trade vs random entries. Each directional
+  hypothesis picks its side on the oldest 60% and is measured on the newest 40% (and each half of it), outcomes
+  without overlap. Corrections: Benjamini–Hochberg within each family (statuses) and over every hypothesis (the
+  verdict). Null tests: the same audit on shuffled and Gaussian copies of the data, and the similarity engine,
+  pattern discovery and strategy discovery on five synthetic datasets with the same pairs, times, sizes and wicks
+  but no predictive structure (permutation, bootstrap, random sign, block of sizes with random signs, Gaussian).
+  Statuses STRONG_EDGE / WEAK_EDGE / NO_EDGE / NOISY_RESULT / OVERFIT / INSUFFICIENT_DATA / UNSTABLE /
+  PERIOD_SPECIFIC / REGIME_SPECIFIC; verdict EDGE_FOUND / WEAK_EVIDENCE / NO_EDGE_FOUND / INSUFFICIENT_DATA; EV of
+  the best result per duration at payouts 70–92% (break-even 1/(1+P): 52.08% at 92%). Saved to the `audits` store
+  (DB v6, last 3). Tests: a random walk → NO_EDGE_FOUND; a planted rule → EDGE_FOUND (that rule only); a planted
+  "first 5 s of the minute" bias → found in that slot only; the engines beat noise only when there is something.
+  **Result on the user's data (2026-10-04, 251k 5s candles on 70 pairs over 7 h, 70k 1M candles on 89 pairs over
+  85 h): NO_EDGE_FOUND.** 1,433 of 29,023 hypotheses had p < 0.05 before correction — chance alone gives ~1,451;
+  over all hypotheses none about direction survived (16 about move size: 1M volatility clusters). One survived only
+  within its family: a 5 s window 10–15 s after the engine's entries goes against the engine 53.3% (n 3,709) — not
+  significant over all tests, absent in the general candles (the 3rd candle after any move/condition ≈ 50%), lower
+  bound below break-even, and PO offers no such window. Similarity and discovery found no more in OTC than in noise.
+- **One decision engine: the Strategy Consensus Engine** (`engine/consensus.js`, v0.11). Every
+  strategy in the library (77, in 10 families: trend, momentum, price action, structure, breakout,
+  volatility, levels, liquidity, mean reversion, hybrid) answers on every analysed close: CALL, PUT,
+  WAIT (setup seen, but a serious objection or too weak) or NO_SIGNAL. Inside a family the strongest
+  signal counts fully and the rest 30% — four trend indicators are one trend reading. Each strategy's
+  weight comes from its own record in this kind of situation (pair / frame / market state, most specific
+  with ≥ 30 recent outcomes): its next-candle results in the newest 40% of analyses, and in the older 60%.
+  Wrong more often than right → less weight down to no vote; an edge counts only as far as it held in
+  both periods; no record → neutral. A setup needs ≥ 3 families giving the direction and none giving the
+  other. There is no confidence threshold: whether such an agreement pays is decided by measured
+  outcomes (the calibration has a cohort for "N families agreed, this frame, this direction"). Built by
+  the worker every 10 minutes from all records (~70 ms, ~30 KB to the tabs); replays use none (no
+  hindsight). Advanced → الفرص shows each strategy's record and weight.
+  Measured on the user's real records before building it (6 days, 23k analyses, judged on the newest
+  40% only): the old engine's decisions won 46.4% (n 448), a majority vote of strategies 48.1%, the family
+  consensus 47–48% — agreement alone showed no edge, so the gate below stays the real filter.
+- **Direction learning** (v0.12). Each cohort's older part also decides whether that kind of opportunity is
+  traded WITH its setup or AGAINST it (the same outcomes read the other way); the newer part then measures the
+  chosen direction — it never picks it — and every period must hold (stability). Seen on real data: on 1M,
+  agreement among the strategy families reversed for hours on one day (follow 44–49% per hour) and continued on
+  another. A reversed entry keeps its setup's direction in its record (so the cohort keeps learning, and stops
+  the reversal when it fades), trades the other way (`fade`), drops the setup's invalidation, and is scored by
+  the monitor in the direction traded. Copy signals are never reversed.
+- **Chart memory** (v0.12). The worker keeps the 5s candles of pairs on a chart for 6 hours (IndexedDB v4,
+  `candles_s5`) besides the 1M/5M ones; a tab rebuilding a pair (reload, ticks resuming) and every hole repair ask
+  it first and PO only for what it lacks. Prices that arrive before a pair proves live (20 s of steady ticks) are
+  held and replayed, so a (re)start no longer loses its first 20 s.
+- **INSUFFICIENT_DATA is NO TRADE** (v0.11): logged and measured, never placed. The card says how far that kind
+  of opportunity is from being judged ("غير مؤكدة: 43 من 75 نتيجة مطلوبة", v0.11.3: 30 outcomes in the newer 40%). The user may allow such
+  entries on a demo account (popup → advanced → "تجربة الفرص غير المؤكدة", `gate.requireHistory: false`);
+  a real account never takes them.
+- **Entry gate: payout ≥ a minimum you set** (popup → settings, `gate.minPayout`, default 80%),
+  checked at the entry moment, in the worker and before the click; the scanner only scans pairs
+  paying at least that. Lower payouts need higher win rates (80% → break-even 55.6%, 92% → 52.1%),
+  which the expected-value model already accounts for.
 - **No fixed confidence number.** `engine/calibration.js` estimates, from out-of-sample outcomes of
   similar past opportunities, a **win probability** (posterior mean with a sceptical prior at
   break-even, plus a 90% interval and the sample size), the **expected value** per stake at the
@@ -58,25 +191,59 @@ Service worker: ranks qualified entries across pairs (confidence, sample, stabil
 - **Every opportunity record** keeps what the system knew: frame roles (context / setup /
   confirmation / entry timing), raw score, estimate (+ version, level, sample, stability), gate
   blocks, platform signal, durations offered, engine version, PO and UTC times — and one execution
-  state (EXECUTED / EXECUTION_FAILED / SHADOW / PROTECTION_BLOCKED / GATED / PAPER / RESEARCH_ONLY …),
+  state (EXECUTED / EXECUTION_FAILED / SHADOW / OTHER_MODE / PROTECTION_BLOCKED / GATED / PAPER / RESEARCH_ONLY …),
   kept apart from how the analysis turned out.
 - **Dashboard → الفرص**: opportunity quality, analysis performance by strategy / frame / regime /
   pair / direction / kind / duration / data status / entry timing / day, execution performance
   (with "analysis right, execution failed"), baselines (opposite, always CALL/PUT, context-frame
   trend, random; on research records: previous candle, platform signal), and calibration.
+- **Maximum trade duration** (popup → settings, `maxTradeSec`, default 1 minute; 3 s … 5 min or no
+  limit). Durations are chosen among PO's presets up to it, setup frames longer than it are not used
+  (the 5s frame always stays), and copy signals with more than 1.5× that time left are skipped (still
+  counted in the list statistics).
+- **3-second trades (PO's S3)** are read from the 5s frame (a 5s setup's closest preset is 3 s; 10s and
+  longer frames never drop to 3 s). Their outcome ends between two 5s closes, so a tab sends the worker
+  1-second closes of its chart pair (batches of ~5, not stored); a 3s horizon that never arrived (pair left
+  the chart) does not keep the record pending. At execution a trade shorter than the entry window may
+  start at most half its length late.
+- The popup warns when a Pocket Option tab still runs an older version of the extension (reload it).
+- **Copy + verify** (panel mode "PO Copy + verify", run by the intelligence engine). The reader takes
+  each whole signal from PO's Signals list (must be visible): pair (currencies, or crypto/stocks by
+  PO's own names), direction arrows, time left (up to 1 h), elapsed (progress bar or "N min ago"),
+  "Copied: N times", and +$ / −$ (the copied trade is winning / losing right now). Signals up to
+  3 minutes old are followed; every signal, on ANY pair, is verified in its own
+  direction against the engine's analysis of that pair — live, or rebuilt from PO history — on the
+  frame matching its time left (≤ 2½ min → 1M, ≤ 15 min → 5M, longer → 15M; the others are context):
+  the contradiction engine, the evidence balance, the market state, whether it came after
+  the move (≥ 0.6 ATR since it started, or +$ on a trade running > 30 s when its start price is
+  unknown; −$ means a better price than the trader got), what the rest of the list says (flipping /
+  opposite majority, weighted by how many traders copied each signal), time left
+  (≥ 20 s), a proven platform signal against it, payout. No objection → an entry (duration = PO's
+  closest preset to the time left; ranked, protected, the pair opened from the list if needed,
+  12 s to place it); objections → GATED with them. Both are measured at the duration taken, and
+  copy signals form their own cohorts in the decision model (never the engine's), so groups that
+  lose get blocked.
+- **History requests are one at a time** (PO's reply carries no request id), served by priority:
+  gap repairs and copy checks first, seeding open pairs next, the scanner (10 pairs) last; the
+  scanner skips its round when the queue is backed up.
+  A tab in copy mode places only copy entries; a tab in engine mode only the engine's.
 - **Dynamic frames** (`engine/frameselect.js`). Each frame is scored on trend/structure
   clarity, noise (efficiency ratio), candle quality, volatility and its track record.
   Frames below `frameSelect.minSetupQuality` are analysed and logged but cannot open an
   opportunity. Context = the clearest allowed higher frame; confirmation = the cleanest
   allowed lower frame, or none (entry at setup closes) if all are noisy.
-- **Live means a steady price flow** (≥ 6 prices a minute: a chart shows the pair). PO also
-  sends occasional prices for other pairs; those stay with the scanner, because candles built
-  from them are full of holes. A chart pair that goes quiet for 45 s goes back to the scanner.
+- **Live means a continuous price flow**: ≥ 20 s of prices with no pause over 6 s (a chart ticks
+  about every second). PO also sends occasional prices, and bursts of them, for pairs in its lists;
+  those stay with the scanner, because candles built from them are full of holes. A live pair that
+  goes quiet for 20 s goes back to the scanner, which rebuilds it from 1M history.
 - **Gaps are refilled**: PO's history often ends a minute or two before live candles begin;
   any recent missing candle is fetched from PO before the analysis instead of blocking the
   frame for 30 candles.
 - **Shadow trades**: in AUTO/MANUAL, an entry no armed tab can place (pair on no armed chart, no time
   to switch) is paper-scored but kept out of the Risk Engine (no open-trade slot, no loss counters).
+  When the pair IS on an armed chart but that tab is in the other mode (the engine's own entry in a
+  "Copy + verify" tab, or the reverse), it is OTHER_MODE — "follow only", not "pair not open"; a copy
+  tab's panel shows its copy signals first.
   The worker reports every entry's outcome to its tab (sent / placed / failed / shadow / blocked by
   protection / gated), and the panel and popup show that instead of a bare "enter now".
 - **Durations come from PO's presets**: the picker list seen on the pair (or on any pair; kept
@@ -113,17 +280,16 @@ Service worker: ranks qualified entries across pairs (confidence, sample, stabil
   (`entryWindowByFrame`: 1M 12s, 5M 30s, 15M 60s) has not passed, price has not run
   or turned beyond `maxChaseAtr` / `maxAdverseAtr`, the invalidation level is intact,
   no opposite opportunity appeared, and the duration exists on the pair.
-- **Regime first.** Only the strategy families listed for the current regime may trade
-  (Settings → JSON `regimeFamilies`). UNCLEAR, HIGH_VOLATILITY and TRANSITIONING trade
-  nothing by default. Inactive strategies are still logged, so you can test whether
-  regime gating helps.
+- **Market state is context, not a hand-made filter.** Which strategies work in which state is
+  learned from their records (the reliability above); UNCLEAR and HIGH_VOLATILITY markets are not
+  traded (unreadable).
 - **No double counting.** Evidence modules are grouped into clusters (trend+momentum,
   location, structure, candle, external). Inside a cluster only the strongest vote
   counts fully. Statistics → "Module vote correlation" shows the measured overlap.
 - **Contradiction engine.** Every candidate gets an "evidence against" list. Some
   items are hard vetoes: strong 15M+1H conflict, a strong level < 0.5 ATR ahead,
-  an exhausted breakout, an abnormal candle, active strategies disagreeing.
-- **SKIP is a result.** Bad data, unclear regime, conflicts, a low score, a missed
+  an exhausted breakout, an abnormal candle, the strategy families agreeing on the other side.
+- **SKIP is a result.** Bad data, unclear regime, conflicts, families split or too few, a missed
   entry window: all SKIP, with the reasons logged. Each SKIP's lean direction is
   scored too, so you can see whether skipping was right.
 
@@ -134,10 +300,10 @@ Service worker: ranks qualified entries across pairs (confidence, sample, stabil
 | Paper trade (default) | simulated trade at the opportunity's chosen duration, scored from 1M closes, counted by the Risk Engine |
 | Alert only | desktop notification + paper tracking |
 | Manual confirmation | dashboard asks; on Confirm the tab places the trade if the entry window is still open |
-| Automatic | qualified entries only (payout ≥ 92% and every check), in a tab that is armed and shows the pair. Demo account: every qualified entry (setting). Real account: only setups you promoted, unless you choose otherwise in Settings; everything else stays paper |
+| Automatic | qualified entries only (payout ≥ your minimum and every check), in a tab that is armed and shows the pair. Demo account: every qualified entry (setting). Real account: only setups you promoted, unless you choose otherwise in Settings; everything else stays paper |
 
-To arm a tab for Manual/Automatic: in that tab's panel choose Mode → "OTC Intelligence
-Engine", press Start, and keep the chart on the pair you want traded. "Demo account only"
+To arm a tab for Manual/Automatic: in that tab's panel choose "المحرك الذكي" (the engine's
+opportunities) or "نسخ + تحقق" (verified copy signals), press Start, and keep the chart on the pair. "Demo account only"
 still applies. A tab refuses an order if it isn't armed, the chart shows another pair,
 or any of the execution-safety checks above fails. If Pocket Option
 doesn't confirm an order within 8s, the engine sets an emergency stop.
@@ -169,9 +335,17 @@ stop. It overrides the strategy side.
    are kept apart (Source filter).
 
 ## Interface (Arabic, RTL)
-- **Popup (click the extension icon) — the main screen.** Is there an opportunity, on which pair, buy or sell,
-  how confident, why, is there risk, and is it time to enter. Tabs: الرئيسية · الأزواج · السجل · البحث · الإعدادات.
-  Plain words only; numbers appear under "التفاصيل الفنية" when "الوضع المتقدم" is on.
+- **Popup (click the extension icon) — the main screen.** One card: the pair, buy or sell, "X of Y strategies
+  agree · N families", entry (now / waiting for …), duration, and the estimate from data — or "لا توجد صفقة —
+  جاري فحص أزواج OTC". Below it the last trade's result and the ranked pairs. Settings: trading on/off
+  (emergency stop), mode (paper / alert / manual / auto); everything else (maximum duration, minimum
+  payout, demo testing, auto options, protection, appearance) is under "إعدادات متقدمة". Pairs, frames,
+  strategies, entry timing and duration are chosen by the system — there is no frame or strategy setting.
+- **In-page panel:** the same decision for the tab's pair, the stake, the mode (المحرك الذكي / نسخ + تحقق /
+  الاتنين — v0.11.5, both kinds in one tab), start/stop; demo-only, currency, CSV and engine details behind the gear.
+  Start survives a reload of the tab (sessionStorage, per tab) — on real data, hours of qualified entries went
+  unplaced because tabs were left stopped after reloads. A stopped tab says so in red; an entry on a pair whose tab
+  is not started is NOT_ARMED ("التبويب غير مفعّل")، and the popup warns when AUTO/MANUAL has no started tab.
 - **الوضع المتقدم** (button in the popup) opens the full dashboard: statistics, validation, discovery, settings.
 - Cairo font is bundled locally (`fonts/`, SIL Open Font License); nothing is loaded from the internet.
 - Wording lives in `ui/ar.js`; the engine emits language-neutral facts (`engine/facts.js`).
@@ -207,14 +381,38 @@ two required conditions, so no single fact can fire it.
 ## Files
 | | |
 |---|---|
-| `engine/` | pure engine, shared by tab, worker, dashboard and tests: `core` (config), `dataquality`, `features` (trend, momentum, Bollinger, structure, S/R, Fibonacci, price action, breakout, liquidity, divergence), `regime`, `factory` + `library` (strategies), `confluence`, `contradiction`, `risk` (+ entry timing), `pipeline`, `stats`, `replay`, `feed`, `orchestrator`, `opportunity`, `expiry`, `copytrade`, `calibration`, `frameselect` |
+| `engine/` | pure engine, shared by tab, worker, dashboard and tests: `core` (config), `dataquality`, `features` (trend, momentum, Bollinger, structure, S/R, Fibonacci, price action, breakout, liquidity, divergence), `regime`, `factory` + `library` (strategies), `consensus` (signals, families, reliability), `research` (replay, similarity, walk-forward, DNA, discovery), `audit` (randomness & edge audit), `confluence`, `contradiction`, `risk` (+ entry timing), `pipeline`, `stats`, `replay`, `feed`, `orchestrator`, `opportunity`, `expiry`, `copytrade`, `calibration`, `frameselect` |
 | `intel-tab.js` | per-tab observer: feeds, per-frame analysis, opportunity lifecycle, expiry choice, execution with safety re-check |
 | `background.js` | service worker: multi-pair state, candidate ranking, Risk Engine, modes, outcomes |
 | `dashboard/` | dashboard page · `db.js` IndexedDB store (records + 5M candles) |
-| `bot.js`, `strategy.js`, `backtest.js` | the original 15s bot (unchanged behaviour), now sharing one history-request queue |
-| `tests/` | `npm test` — 99 tests, no dependencies (Node 18+) |
+| `research-worker.js` | runs a research cycle (similarity + strategy discovery on market states) for the dashboard, and for the worker through `research/offscreen.html`; and the randomness & edge audit (dashboard) |
+| `bot.js` | the page side: PO's price stream, history queue, asset list, platform signals, copy-trading list, expiry picker, pair switching, buy/sell clicks, the panel. No strategy of its own (the original 15s bot, its strategies, paper tests, scanner, backtest and martingale were removed in v0.11; a tab saved in one of its modes runs the engine) |
+| `tests/` | `npm test` — 165 tests, no dependencies (Node 18+) |
 
 ## Known limits
+- **Copy durations** (v0.11.4): a copy's duration is PO's preset closest to the time the signal has left, and
+  only within ×1.6 of it — PO offers nothing between M5 and M30, so a signal with ~8–19 minutes left is not
+  followed ("no_duration") instead of being copied as a 30-minute trade.
+- **Execution forensics** (v0.14.1). PO's close event carries its own deal record (open/close price and time to the
+  millisecond); the worker compares it with the market feed: delay from the entry moment to PO's open, open slippage
+  vs the signal price, PO's close price vs the market price at that second, and whether PO's result differs from the
+  market's. Advanced → الفرص shows the totals. On the user's first 18 trades (candle-based check): 16 agreed, 2
+  candle wins were PO losses (moves of ~0.1 bp — likely execution delay), none the other way; too few to conclude.
+- **Self-check window** (v0.14.1): the monitor judges the last 48 h (`gate.monitorWindowH`), so a rejected model is
+  re-judged once the entries that sank it age out; while rejected, measured entries stop and the popup says why; the
+  user's demo test of unmeasured entries continues (never real, never counted).
+- **Timing myths tested** (2026-10-04, 74k 5s candles, 51 pairs, 39 tests, BH): up-rate in each 5-second slot of the
+  minute, the first 5 s after a minute (continue the last minute: 51%), the last 5 s (closing push: 50.2%), after a
+  big minute, at 5-minute boundaries, volatility by slot (flat) — nothing significant.
+- **Holes in PO's history** (v0.11.1). PO's 5s history can end minutes before live candles start (after a
+  reload, a frozen background tab or a paused stream). The hole itself is requested again (every 20s while it
+  makes a frame unreadable, then once a minute), small windows only. The setup frame is unreadable while the
+  hole is among its last 30 candles (5s frame: at most ~2.5 min); a context frame only while it is among its
+  last 3. The popup says "جاري استكمال البيانات" with the reason instead of a bare error. When ticks resume after
+  such a pause, the minutes-old candle they close is not analysed (it was "last candle closed long ago"); the
+  hole up to the forming candle is requested at once (v0.11.2). Seen on real data: holes filled in 30–75 s.
+- With a maximum duration of 3s only the 5s frame is analysed, and seconds frames need a pair on a chart:
+  pairs without a chart (scanned from history) are not analysed at all at that setting.
 - Built and tested against simulated data, not yet against live Pocket Option.
   It assumes PO's `loadHistoryPeriod` honours `period` = 60/300/900/3600, which is
   what its chart uses. If it doesn't, Data Quality marks the timeframe wrong and every
@@ -238,62 +436,3 @@ two required conditions, so no single fact can fire it.
   and only as far as the bot's own measurements of that code support it.
 - Pairs are not independent (they share currencies), and profiles are tested many at
   a time. Treat everything short of VALIDATED, and a forward test after it, as unproven.
-
----
-
-# البوت القديم (شموع 15 ثانية)
-
-
-## التسطيب
-1. افتح `chrome://extensions` وشغّل **Developer mode**.
-2. **اقفل** Avalisa والبوتات التانية بتاعة PO، علشان بيقفلوا الـ WebSocket ومش هيسيبوا البوت ده يشوف الأسعار.
-3. اضغط **Load unpacked** واختار فولدر `po-bot`.
-4. افتح Pocket Option على حساب **الديمو**، وهتلاقي لوحة البوت ظاهرة على يمين الشاشة.
-
-## الاستخدام
-- **مدة الصفقة (expiry) بتظبطها بنفسك في PO** (مثلاً دقيقة)، والبوت مش بيغيّرها.
-- البوت بيطلب تاريخ آخر ~11 دقيقة من الموقع أول ما يشتغل، فبيبدأ يحلل على طول من غير ما يستنى.
-- الشمعة اللي بيحلل عليها (15 ثانية افتراضياً) مختلفة عن مدة الصفقة. مدة الصفقة بتظبطها انت في PO.
-- زرار **Export CSV** بينزّل كل الصفقات، علشان تحسب نسبة الكسب الحقيقية.
-
-## الاستراتيجيات (6)
-| الاستراتيجية | النوع | الفكرة |
-|---|---|---|
-| BB + RSI reversal | انعكاس | السعر يلمس حد Bollinger، والـ RSI أقل من 30 أو أكتر من 70 ويبدأ يرجع |
-| Stochastic reversal | انعكاس | خط %K يقطع خط %D في منطقة تشبّع الشراء أو البيع |
-| Support / resistance bounce | انعكاس | السعر يرتد من دعم أو مقاومة، وتظهر شمعة بذيل رفض |
-| EMA 9/21 cross | اتجاه | تقاطع جديد بين EMA9 وEMA21، والـ RSI في نفس الاتجاه |
-| MACD momentum flip | اتجاه | هيستوجرام الـ MACD يقلب، والسعر في الناحية الصح من EMA21 |
-| Trend pullback | اتجاه | السعر يرجع لـ EMA9 في اتجاه واضح، وبعدين يكمّل |
-
-## الأوضاع (Mode)
-- **Consensus**: يدخل الصفقة لما عدد معيّن من الاستراتيجيات (Min votes) يتفقوا على نفس الاتجاه، وبشرط إن مفيش ولا استراتيجية شايفة الاتجاه العكسي.
-- **Auto**: يدخل بس بالاستراتيجيات اللي **ثبتت نفسها**، يعني اتجرّبت على الورق 30 مرة على الأقل، والحد الأدنى المضمون لنسبة كسبها (بثقة 90%) أعلى من نقطة التعادل. لحد ما ده يحصل البوت **مش بيدخل ولا صفقة**، وبيكتب في اللوحة إنه لسه بيتعلّم.
-
-## الحساب الحقيقي
-على الحساب الحقيقي، في **أي وضع**، البوت مش بيدخل صفقة غير لو **كل** الاستراتيجيات اللي اتفقت عليها ثابتة **على الزوج اللي انت فاتحه نفسه**، مش متوسط نتايجها على أزواج تانية. الاستراتيجية دي بيظهر جنبها في الجدول ★★. أما ★ لوحدها فمعناها إنها ثابتة على الديمو بس.
-
-## ليه 7 من 10 مش كفاية
-لو استراتيجية كسبت 7 صفقات من 10، ممكن جداً يكون ده حظ. الحد الأدنى المضمون لنسبة كسبها حوالي **50%** بس، وده أقل من نقطة التعادل. لكن لو كسبت 70 من 100، يبقى الحد الأدنى المضمون حوالي **64%**. علشان كده البوت بيحكم على الاستراتيجية بالحد الأدنى المضمون ده، مش بالنسبة اللي ظاهرة. ولو حطيت الماوس على نسبة الكسب في الجدول، هتشوف الحد الأدنى.
-- **Single strategy**: يدخل باستراتيجية واحدة بس انت تختارها.
-
-## اختبار على الورق (Shadow) ومدة كل استراتيجية
-البوت بيجرّب كل الاستراتيجيات على الورق طول الوقت، حتى وهو واقف. أي إشارة بتطلع، بيسجّلها كأنها **5 صفقات في نفس الوقت** بخمس مدد: **15 ثانية، و30 ثانية، ودقيقة، و3 دقايق، و5 دقايق**. وبعد كل مدة بيشوف الصفقة كسبت ولا خسرت.
-
-لو اختيار **"Bot picks expiry per strategy"** شغال (وده الافتراضي):
-- كل استراتيجية بتدخل الصفقة بالمدة اللي كسبت فيها أكتر على الورق. عمود **Expiry** في الجدول بيوضحها.
-- قبل ما يبقى فيه نتايج كفاية، كل نوع ليه مدة افتراضية: استراتيجيات الارتداد حوالي 4 شموع، واستراتيجيات الاتجاه حوالي 10 شموع. وجنب المدة بتلاقي علامة **?** معناها إن دي لسه المدة الافتراضية.
-- البوت **بيغيّر المدة في PO لوحده** قبل كل صفقة، وبيتأكد إنها اتغيّرت فعلاً. لو مقدرش يغيّرها أو مقدرش يتأكد، **بيقف ومايدخلش الصفقة**.
-- لو حطيت الماوس على أي صف في الجدول، هتشوف نسبة كسب الاستراتيجية دي في كل مدة.
-
-لو قفلت الاختيار ده، البوت هيدخل كل الصفقات بالمدة اللي في خانة **Fixed PO expiry**، ولازم انت تظبطها بنفسك في PO.
-
-## فلاتر الأمان
-- **ADX**: لو الاتجاه قوي (ADX ≥ 30)، ممنوع صفقات الانعكاس اللي ضد الاتجاه. ولو السوق نايم (ADX < 20)، ممنوع صفقات الاتجاه.
-- **شمعة مفاجئة**: لو شمعة كانت أكبر من 2.5 ضعف الـ ATR، البوت مش بيدخل. ونفس الكلام لو السوق واقف ومفيش حركة.
-- **Min payout**: لو نسبة الربح في PO أقل من 80%، البوت مش بيدخل.
-- **Cooldown**: بعد أي خسارة، البوت بيستنى عدد شموع قبل ما يدخل تاني.
-- **الحدود**: وقف عند خسارة معيّنة، ووقف عند ربح معيّن، وحد أقصى لعدد الصفقات، ووقف بعد عدد خسارات ورا بعض. والمارتينجال مقفول من الأول، وأقصاه 4 خطوات.
-
-## نقطة التعادل
-لو PO بيدفع 85% ربح، لازم تكسب **54%** من الصفقات علشان ماتخسرش. اللوحة بتحسب الرقم ده من نسبة الربح الحالية، وبتلوّن نسبة كسب كل استراتيجية حسبه: أخضر يعني كسبانة، وبرتقاني يعني على الحافة، وأحمر يعني خسرانة.

@@ -74,8 +74,10 @@
       if (!s && !need.includes(tf)) continue;
       // HTF series end with a partial (forming) candle built from 5M data; exclude it here.
       const closed = (s || []).filter((c) => !c.partial);
+      // a context frame gives direction and levels: a hole a few of its candles back doesn't make it unreadable
+      // (PO's history often ends a few minutes before live candles start); the setup frame stays strict
       const r = checkSeries(closed, { tf, now: tf === OTC.TF.PRIMARY ? now : null, minCount: OTC.minCandles(cfg, tf),
-        lastPrice: tf === OTC.TF.PRIMARY ? lastPrice : null });
+        lastPrice: tf === OTC.TF.PRIMARY ? lastPrice : null, recentBars: tf === OTC.TF.PRIMARY ? 30 : 3 });
       per[tf] = r;
       for (const x of r.issues) {
         const required = need.includes(tf);

@@ -1,3 +1,8 @@
+// locked edition (shared copy): the advanced views are closed
+if (globalThis.PO_EDITION?.locked) {
+  document.body.innerHTML = '<p dir="rtl" style="font:16px system-ui;color:#ccc;background:#111;padding:40px;margin:0;min-height:100vh">الوضع المتقدم مقفول في هذه النسخة.</p>';
+  throw new Error('locked edition');
+}
 // OTC Intelligence dashboard. Live state comes from the service worker over a
 // port; the decision log, statistics and research read IndexedDB directly and
 // use the same engine code as the tabs.
@@ -87,19 +92,35 @@ function horizons() {
 const FRAME_OPTS = [['5', 'تحليلات فريم 5 ثوانٍ'], ['10', 'تحليلات فريم 10 ثوانٍ'], ['15', 'تحليلات فريم 15 ثانية'], ['30', 'تحليلات فريم 30 ثانية'], ['60', 'تحليلات فريم الدقيقة'], ['300', 'تحليلات فريم 5 دقائق'], ['900', 'تحليلات فريم 15 دقيقة'], ['opp', 'الفرص (دخول فعلي أو ميل)']];
 
 function render() {
-  const fn = { live: renderLive, opps: renderOpps, log: renderLog, stats: renderStats, matrix: renderMatrix, validation: renderValidation, research: renderResearch, discovery: renderDiscovery, settings: renderSettings }[S.view];
+  const fn = { live: renderLive, opps: renderOpps, losses: renderLosses, log: renderLog, stats: renderStats, matrix: renderMatrix, validation: renderValidation, research: renderResearch, discovery: renderDiscovery, settings: renderSettings }[S.view];
   Promise.resolve(fn()).catch((err) => { $(`#view-${S.view}`).innerHTML = `<p class="bad">خطأ: ${e(err.message)}</p>`; console.error(err); });
 }
 
 // Calibrated confidence: the gate, and whether the model is honest so far. Buckets of the
 // confidence the engine claimed at entry (traded or gated), against what then happened.
+// Each strategy's own record (engine/consensus.js): what the consensus weighs it by right now.
+function relHtml(records) {
+  const cfg = S.snap?.cfg || OTC.DEFAULT_CONFIG, t = OTC.Consensus.buildReliability(records, cfg);
+  const rows = OTC.Strategies.listAll().map((st) => {
+    const x = t.keys[st.id], r = OTC.Consensus.reliability(st.id, { asset: null, frame: null, regime: null }, t, cfg);
+    return { st, x, r, fam: AR.FAMILY[OTC.Consensus.groupOf(st.id, st.family)] };
+  }).sort((a, b) => (b.x ? 1 : 0) - (a.x ? 1 : 0) || b.r.w - a.r.w || (b.x?.[0] ?? 0) - (a.x?.[0] ?? 0));
+  const wr = (n, w) => (n ? pct((100 * w) / n) : '–');
+  return `<h2>موثوقية الاستراتيجيات</h2>
+    <p class="note">كل استراتيجية تُعطي إشارة (شراء / بيع / انتظار / لا شيء)، وتُجمع حسب العائلة: داخل العائلة الواحدة تُحسب أقوى إشارة كاملة والباقي 30% فقط، فأربعة مؤشرات اتجاه لا تُعتبر أربعة تأكيدات. وزن كل استراتيجية من سجلها: نتيجة الشمعة التالية بعد إشارتها، في الجزء الأحدث (${Math.round(cfg.consensus.recentFraction * 100)}%) والأقدم. أخطأت أكثر مما أصابت ← وزن أقل حتى لا صوت؛ ميزة لا تُحسب إلا بقدر ما ظهرت في الفترتين. لا تحسب إلا بعد ${cfg.consensus.minN} نتيجة. (الجدول على مستوى الاستراتيجية كلها؛ القرار يستخدم الأدق: الزوج، الفريم، حالة السوق.)</p>
+    <div class="detail">من ${t.meta.records} تحليل · ${t.meta.measured} مجموعة مقاسة</div>
+    <div class="tablewrap"><table><tr><th>الاستراتيجية</th><th>العائلة</th><th class="n">إشارات حديثة</th><th class="n">صواب حديث</th><th class="n">صواب أقدم</th><th class="n">الوزن</th></tr>
+    ${rows.map(({ st, x, r, fam }) => `<tr><td>${e(AR.strategyName(st.id))}</td><td>${e(fam)}</td><td class="n">${x ? x[0] : '–'}</td><td class="n">${x ? wr(x[0], x[1]) : '–'}</td>
+      <td class="n dim">${x ? wr(x[2], x[3]) : '–'}</td><td class="n ${!r.measured ? 'dim' : r.w === 0 ? 'bad' : r.w > 1 ? 'ok' : ''}">${r.measured ? (r.w === 0 ? 'بلا صوت' : r.w.toFixed(2)) : 'محايد'}</td></tr>`).join('')}</table></div>`;
+}
+
 function calHtml(s) {
   const c = s.calStatus || { status: 'COLLECTING', rows: [] }, g = s.cfg.gate || {};
   const ST = { COLLECTING: ['muted', 'يجمع النتائج'], OK: ['', 'سليم حتى الآن'], CONFIRMED: ['ok', 'مؤكَّد'], REJECTED: ['bad', 'مرفوض — التداول متوقف'] };
   const [cls, txt] = ST[c.status] || ST.COLLECTING;
   const label = (r) => (r.lo == null ? 'لم تُقَس (بلا تاريخ)' : `${r.lo}–${Math.min(100, r.hi)}%`);
   return `<h2>شروط الدخول ونموذج الثقة <span class="${cls}" style="font-size:.8em">${txt}</span></h2>
-    <p class="note">لا دخول على زوج نسبة ربحه أقل من ${g.minPayout ?? 92}%. لا يوجد رقم ثابت للثقة: احتمال الفوز يُقدَّر من نتائج فرص مشابهة خارج العينة (مع النطاق وحجم العينة)، ولا دخول إلا إذا كان الربح المتوقع موجبًا والنتائج مستقرة؛ بلا بيانات كافية تُعتبر "غير مؤكدة" (تجريبي فقط). الجدول يقارن الاحتمال المقدَّر بما حدث فعلًا (خطأ المعايرة ${c.calibrationError != null ? c.calibrationError + ' نقطة' : 'غير متاح بعد'})؛ إذا لم تتفوق الفرص التي سمح بها النموذج على نقطة التعادل (بعد ${g.monitorMinN ?? 30} فرصة) يُرفض ويتوقف التداول.</p>
+    <p class="note">لا دخول على زوج نسبة ربحه أقل من ${g.minPayout ?? 80}%. لا يوجد رقم ثابت للثقة: احتمال الفوز يُقدَّر من نتائج فرص مشابهة خارج العينة (مع النطاق وحجم العينة)، ولا دخول إلا إذا كان الربح المتوقع موجبًا والنتائج مستقرة؛ بلا بيانات كافية تُعتبر "غير مؤكدة": لا صفقة (تُسجَّل وتُقاس فقط، إلا إذا سمحت بتجربتها على الديمو). الجدول يقارن الاحتمال المقدَّر بما حدث فعلًا (خطأ المعايرة ${c.calibrationError != null ? c.calibrationError + ' نقطة' : 'غير متاح بعد'})؛ إذا لم تتفوق الفرص التي سمح بها النموذج على نقطة التعادل (بعد ${g.monitorMinN ?? 30} فرصة) يُرفض ويتوقف التداول.</p>
     <div class="tablewrap"><table><tr><th>احتمال الفوز المقدَّر</th><th class="n">العدد</th><th class="n">المتوسط المقدَّر</th><th class="n">نسبة النجاح الفعلية</th><th class="n">نطاق 90%</th><th class="n">التعادل</th></tr>
     ${(c.rows || []).map((r) => `<tr><td>${label(r)}</td><td class="n">${r.n}</td><td class="n dim">${r.predicted != null ? pct(r.predicted) : '–'}</td><td class="n ${r.n >= 30 ? (r.ci[0] >= r.be ? 'ok' : r.ci[1] < r.be ? 'bad' : '') : 'dim'}">${pct(r.wr)}</td>
       <td class="n dim">${r.n ? `${f1(r.ci[0])}–${f1(r.ci[1])}` : '–'}</td><td class="n dim">${f1(r.be)}%</td></tr>`).join('') || '<tr><td colspan="6" class="dim">لا توجد فرص منتهية بعد.</td></tr>'}</table></div>`;
@@ -110,8 +131,9 @@ function calHtml(s) {
 // duration — the ANALYSIS. What happened when the system tried to place it is the EXECUTION, measured
 // apart: an analysis can be right and its execution fail. Baselines show whether the analysis adds anything.
 const OPP_DIMS = {
-  setup: ['الاستراتيجية', (r) => r.setup], frame: ['الفريم', (r) => r.frame], regime: ['حالة السوق', (r) => r.regime], asset: ['الزوج', (r) => r.asset],
+  origin: ['المصدر', (r) => (r.origin === 'copy' ? 'نسخ مع تحقق' : 'المحرك')], setup: ['الاستراتيجية', (r) => r.setup], frame: ['الفريم', (r) => r.frame], regime: ['حالة السوق', (r) => r.regime], asset: ['الزوج', (r) => r.asset],
   lean: ['الاتجاه', (r) => r.lean], kind: ['نوع الفرصة', (r) => r.setupKind || r.facts?.kind], expiry: ['المدة', (r) => r.expirySec],
+  cons: ['عائلات الاستراتيجيات المتفقة', (r) => (r.cons?.dir === r.lean && r.cons.ff ? `${Math.min(r.cons.ff, 5)}${r.cons.ff >= 5 ? '+' : ''} عائلات` : null)],
   data: ['حالة البيانات', (r) => (r.cal?.measured ? 'مقاسة' : 'غير كافية')], entry: ['توقيت الدخول', (r) => r.why], day: ['اليوم', (r) => new Date(r.ts * 1000).toISOString().slice(0, 10)],
 };
 const outcomeAt = (r, dir) => OTC.Stats.outcome(r, dir, r.expirySec / (r.tf || 60));
@@ -126,8 +148,19 @@ const tallyRow = (label, x) => `<tr><td>${label}</td><td class="n">${x.n}</td><t
   <td class="n ${x.ev > 0 ? 'ok' : x.ev < 0 ? 'bad' : ''}">${f1(x.ev, 3)}</td><td class="n dim">${f1(x.be)}%</td></tr>`;
 const TALLY_HEAD2 = '<th class="n">العدد</th><th class="n">نجاح</th><th class="n">خسارة</th><th class="n">نسبة النجاح</th><th class="n">نطاق 90%</th><th class="n">العائد/صفقة</th><th class="n">التعادل</th>';
 const STATE_AR = { ENTERED: 'دخلت', GATED: 'لم تجتز الشروط', MISSED_ENTRY: 'فاتت', INVALIDATED: 'أُلغيت', EXPIRED: 'انتهت' };
-const EXEC_AR = { EXECUTED: 'نُفّذت', EXECUTION_FAILED: 'فشل التنفيذ', SHADOW: 'زوج غير مفتوح (ظل)', PROTECTION_BLOCKED: 'منعتها الحماية', GATED: 'رفضها فحص الخلفية',
+const EXEC_AR = { EXECUTED: 'نُفّذت', EXECUTION_FAILED: 'فشل التنفيذ', SHADOW: 'زوج غير مفتوح (ظل)', OTHER_MODE: 'الزوج على تبويب بوضع آخر (متابعة فقط)', NOT_ARMED: 'التبويب غير مفعّل (لم يُضغط تشغيل)', PROTECTION_BLOCKED: 'منعتها الحماية', GATED: 'رفضها فحص الخلفية',
   PAPER: 'ورقية', ALERT: 'تنبيه', AWAITING_CONFIRMATION: 'بانتظار تأكيد', NOT_CONFIRMED: 'لم تُؤكَّد', SENT: 'أُرسلت', RESEARCH_ONLY: 'بحث فقط (حساب حقيقي بلا بيانات)' };
+
+// Execution forensics (background.js forensics()): PO's own open/close prices vs the market feed, per executed trade.
+function forensicsLine(all) {
+  const xs = all.map((r) => r.exec?.forensics).filter(Boolean);
+  if (!xs.length) return 'تسجيل التنفيذ: لا توجد صفقات منفذة بأسعار المنصة بعد.';
+  const avg = (k) => { const v = xs.map((x) => x[k]).filter((x) => x != null); return v.length ? (v.reduce((a, b) => a + b, 0) / v.length).toFixed(2) : '–'; };
+  const dev = xs.filter((x) => x.closeDevBp != null), worse = dev.filter((x) => x.closeDevBp > 0.01).length, better = dev.filter((x) => x.closeDevBp < -0.01).length;
+  const mism = xs.filter((x) => x.poOutcome && x.marketOutcome && x.poOutcome !== x.marketOutcome);
+  return `تسجيل التنفيذ (${xs.length} صفقة): التأخير ${avg('delaySec')} ث · فرق سعر الفتح ${avg('openSlipBp')} نقطة أساس (+ = أسوأ لك) · سعر قفل المنصة مقابل السوق في نفس اللحظة: أسوأ لك ${worse} · أحسن لك ${better} · متساوٍ ${dev.length - worse - better}
+    · نتيجة المنصة ≠ نتيجة السوق: ${mism.length}${mism.length ? ` (ضدك ${mism.filter((x) => x.poOutcome === 'L').length})` : ''}. نمط ثابت "أسوأ لك" على عدد كبير من الصفقات = دليل؛ صفقات قليلة لا تثبت شيئًا.`;
+}
 
 async function renderOpps() {
   const el = $('#view-opps');
@@ -174,6 +207,7 @@ async function renderOpps() {
     <div class="detail">حالة التنفيذ: ${list(count(exec, (r) => r.execState), (k) => EXEC_AR[k] || k)}
 أسباب فشل التنفيذ: ${list(count(all.filter((r) => r.execState === 'EXECUTION_FAILED'), (r) => String(r.execDetail || r.exec?.reason || '–').replace(/[-\d.]+/g, '#').slice(0, 60)))}
 أسباب منع الحماية: ${list(count(all.filter((r) => r.execState === 'PROTECTION_BLOCKED').flatMap((r) => (r.execDetail || r.exec?.flags || []).map((f) => ({ f }))), (x) => x.f), (k) => AR.RISK_FLAG[k] || k)}
+${forensicsLine(all)}
 تحليل صحيح لكن التنفيذ فشل: ${failedButRight}</div>
     <div class="tablewrap"><table><tr><th>صفقات نُفّذت فعلًا</th>${TALLY_HEAD2}</tr>${tallyRow('النتيجة الفعلية من المنصة', tally(executed.map((r) => ({ out: r.exec.result, payout: r.payout }))))}</table></div>
 
@@ -189,7 +223,8 @@ async function renderOpps() {
 
     <h2>المعايرة</h2>
     <div class="detail">إصدار النموذج: ${e(cm?.version || '–')}${cm?.meta ? ` · بُني من ${cm.meta.members} نتيجة (${cm.meta.from ? time(cm.meta.from) : '–'} → ${cm.meta.to ? time(cm.meta.to) : '–'}) · مجموعات: ${cm.meta.cohorts.entries} فرص + ${cm.meta.cohorts.setups} تحليلات · الجزء الأقدم ${Math.round(cm.meta.selFraction * 100)}% للاختيار، الأحدث للقياس` : ''}</div>
-    ${calHtml(S.snap || { cfg: OTC.DEFAULT_CONFIG })}`;
+    ${calHtml(S.snap || { cfg: OTC.DEFAULT_CONFIG })}
+    ${relHtml(await loadRecords())}`;
   $('#oppDim').onchange = (ev) => { S.opt.oppDim = ev.target.value; renderOpps(); };
 }
 
@@ -501,13 +536,166 @@ function onHistoryMsg(m) {
 }
 function researchLog(t) { S.research.log.push(`${new Date().toLocaleTimeString()} ${t}`); const x = $('#rlog'); if (x) { x.textContent = S.research.log.slice(-40).join('\n'); x.scrollTop = 1e9; } }
 
+// ── Historical Intelligence: the research dataset, its collector, and what replaying it shows ──────────
+const DNA_AR = { up: 'الشمعة الجاية صاعدة', run1: 'تكمل بعد شمعة في نفس الاتجاه', run2: 'تكمل بعد 2 في نفس الاتجاه', run3: 'تكمل بعد 3 في نفس الاتجاه',
+  run4: 'تكمل بعد 4 في نفس الاتجاه', run5: 'تكمل بعد 5 في نفس الاتجاه', run6: 'تكمل بعد 6 أو أكثر', big: 'تكمل بعد شمعة كبيرة', top: 'ترجع من قمة نطاقها',
+  bottom: 'ترتد من قاع نطاقها', quiet: 'تكمل وقت الهدوء', wild: 'تكمل وقت التذبذب العالي', upwick: 'تنزل بعد ذيل علوي طويل', lowick: 'تطلع بعد ذيل سفلي طويل' };
+const BASE_AR = { prevSame: 'زي الشمعة اللي فاتت', prevReverse: 'عكس الشمعة اللي فاتت', momentum3: 'اتجاه آخر 3 شموع', alwaysUp: 'صعود دايمًا' };
+const H = { worker: null, log: [] };
+function histLog(t) { H.log.push(`${new Date().toLocaleTimeString()} ${t}`); const x = $('#hlog'); if (x) { x.textContent = H.log.slice(-30).join('\n'); x.scrollTop = 1e9; } }
+async function historicalHtml() {
+  const ds = S.snap?.dataset, c = S.snap?.cfg?.collector || OTC.DEFAULT_CONFIG.collector;
+  let model = null, strategies = [];
+  try { model = (await DB.all('research')).sort((a, b) => b.builtAt - a.builtAt)[0] || null; } catch (_) {}
+  try { strategies = OTC.Lifecycle.latest(await DB.all('strategies')); } catch (_) {}
+  let audit = null, auditReal = null;
+  try { const au = (await DB.all('audits')).sort((a, b) => b.builtAt - a.builtAt); audit = au.find((x) => (x.market || 'otc') === 'otc') || null; auditReal = au.find((x) => x.market === 'real') || null; } catch (_) {}
+  const realPairs = [...new Set([...Object.keys(ds?.s5 || {}), ...Object.keys(ds?.m1 || {})])].filter((a) => !/_otc$/i.test(a));
+  const pairs = [...new Set([...Object.keys(ds?.s5 || {}), ...Object.keys(ds?.m1 || {})])].sort((a, b) => (ds?.s5?.[b]?.hours ?? 0) - (ds?.s5?.[a]?.hours ?? 0));
+  const tot5 = Object.values(ds?.s5 || {}).reduce((n, x) => n + x.hours, 0);
+  const tfName = (tf) => (+tf === 5 ? 'شموع 5 ثوانٍ' : 'شموع الدقيقة');
+  const sec = (x) => (x < 60 ? `${x} ث` : `${x / 60} د`);
+  const resHtml = !model ? '<p class="note">لم يُشغَّل البحث بعد.</p>' : [5, 60].map((tf) => {
+    const r = model.results?.[tf];
+    if (!r) return '';
+    if (r.tooFew) return `<h3>${tfName(tf)}</h3><p class="note">بيانات قليلة (${r.states} حالة) — يحتاج ${OTC.Research.DEFAULTS.warm + 500} على الأقل.</p>`;
+    const sigCells = model.summary.significantCells[tf] || [];
+    const verdict = sigCells.length || model.summary.validated[tf]
+      ? `<p class="ok">يوجد سلوك متكرر صمد للاختبار: ${sigCells.map((x) => `${sec(x.sec)} بقوة ${x.bucket}: ${x.rate}% من ${x.n}`).join('، ')}${model.summary.validated[tf] ? ` · ${model.summary.validated[tf]} نمط مكتشف صمد لكل المراحل` : ''}</p>`
+      : `<p class="bad">لا يوجد دليل حتى الآن على أن الحركة السابقة تتنبأ بالقادمة في هذه البيانات: التاريخ المشابه لم يتفوق على الصدفة ولا على المقارنات البسيطة، ولا نمط صمد لكل المراحل.</p>`;
+    return `<h3>${tfName(tf)} <span class="dim" style="font-size:.8em">${r.states} حالة · ${r.pairs} زوج · ${r.from ? time(r.from) : ''} → ${r.to ? time(r.to) : ''}</span></h3>${verdict}
+      <div class="tablewrap"><table><tr><th>بعد</th><th class="n">التاريخ المشابه أصاب</th><th class="n">نطاق الثقة</th><th class="n">اختبارات مستقلة</th><th class="n">أحسن مقارنة بسيطة</th><th class="n">الفرق</th><th>أقوى درجات التشابه</th></tr>
+      ${r.wf.horizons.map((h) => { const best = Object.entries(h.baselines).sort((a, b) => (b[1].rate ?? 0) - (a[1].rate ?? 0))[0];
+        return `<tr><td>${sec(h.sec)}</td><td class="n ${h.analog.significant ? 'ok' : ''}">${pct(h.analog.rate)}</td><td class="n dim">${h.analog.lo ?? '–'}–${h.analog.hi ?? '–'}</td><td class="n">${h.analog.n}</td>
+          <td class="n">${pct(best[1].rate)} <span class="dim">${e(BASE_AR[best[0]])}</span></td><td class="n ${h.lift > 0 ? 'ok' : h.lift < 0 ? 'bad' : ''}">${h.lift > 0 ? '+' : ''}${f1(h.lift)}</td>
+          <td class="dim">${h.buckets.map((b) => `${b.bucket}: ${b.rate == null ? '–' : b.rate + '%'} (${b.n})${b.significant ? ' ✓' : ''}`).join(' · ')}</td></tr>`; }).join('')}</table></div>
+      <div class="detail">الاكتشاف: ${r.discovery.tested} نمط مُرشَّح · ${r.discovery.reachedOos} وصلت لاختبار البيانات الجديدة · صمد ${r.discovery.patterns.filter((p) => p.status === 'VALIDATED').length} (المتوقع صدفة حوالي ${r.discovery.expectedFalse}) · عند ربح ${r.discovery.payout}%
+        ${r.discovery.patterns.map((p) => `<br>${e(p.key)} · ${sec(p.sec)} · ${AR.dir(p.dir)}: تدريب ${p.train.rate}% · تحقق ${p.validation.rate}% · جديد ${p.oos.rate}% من ${p.oos.n}${p.status === 'VALIDATED' ? ' ✓' : ` <span class="dim">(${e(p.why)})</span>`}`).join('')}</div>
+      ${discSummary(model.discovery?.[tf], strategies)}
+      <div class="detail">بصمة السوق ككل (${r.dna.pooled.horizonSec} ث بعد): ${r.dna.pooled.rows.map((x) => `${e(DNA_AR[x.id] || x.id)} ${x.rate}% (${x.n})${x.significant ? ' ✓' : ''}`).join(' · ')}</div>
+      <div class="detail">بصمات الأزواج (✓ = صمد بعد التصحيح عبر كل الأزواج): ${Object.entries(r.dna.pairs).filter(([, d]) => d.significant).map(([a, d]) => `<br><b>${e(pair(a))}</b>: ${d.rows.filter((x) => x.significant).map((x) => `${e(DNA_AR[x.id] || x.id)} ${x.rate}% من ${x.n}`).join('، ')}`).join('') || 'لا يوجد زوج له سلوك مختلف بشكل مؤكد'}</div>`;
+  }).join('');
+  return `<h2>البحث التاريخي</h2>
+    <p class="note">النظام يسجّل تاريخ أزواج OTC ويعيد تشغيله لحظة بلحظة: في كل لحظة يبحث عن مواقف مشابهة <b>في الماضي فقط</b> ويرى ماذا حدث بعدها، ثم يقارن ذلك بما حدث فعلًا وبمقارنات بسيطة. لا شيء هنا يُتداول إلا إذا صمد لهذا الاختبار. النتائج السابقة لا تضمن المستقبل.</p>
+    <div class="row"><button id="hCollect">${c.on ? 'إيقاف سحب البيانات' : 'تشغيل سحب البيانات'}</button><button id="hRun" class="primary">تشغيل البحث الآن</button><button id="hStop">إيقاف البحث</button></div>
+    <div class="detail">سحب البيانات ${c.on ? '<span class="ok">يعمل</span>' : '<span class="bad">متوقف</span>'}: أعلى ${c.maxPairs} زوج ربحًا · 5 ثوانٍ لآخر ${c.hours} ساعة · الدقيقة لآخر ${c.hours1m} ساعة (يعمل في تبويب واحد في الخلفية عندما تكون المنصة غير مشغولة)
+      · المخزن: ${tot5} ساعة من شموع 5 ثوانٍ على ${Object.keys(ds?.s5 || {}).length} زوج${ds ? ` · آخر تحديث ${new Date(ds.at).toLocaleTimeString()}` : ''}</div>
+    <pre id="hlog" class="detail" style="max-height:120px;overflow:auto;direction:rtl;text-align:right">${e(H.log.slice(-30).join('\n'))}</pre>
+    <h2 style="margin-top:18px">تدقيق العشوائية: هل في ميزة حقيقية؟</h2>
+    <p class="note">بيحاول <b>يهدم</b> أي ميزة ظاهرة بدل ما يدوّر على واحدة: كل فرضية بتختار اتجاهها من أقدم 60% من البيانات وتتقاس على أحدث 40% وفي نصّيها، مع تصحيح لعدد الاختبارات، ومقارنة بنفس البيانات بعد خلطها عشوائيًا. بياخد كام دقيقة.</p>
+    <div class="row"><label>السوق <select id="aMarket"><option value="otc">OTC (أسعار المنصة)</option><option value="real">الأسواق الحقيقية (عملات، كريبتو، أسهم)</option></select></label><button id="aRun" class="primary">تشغيل التدقيق</button><button id="aStop">إيقاف</button></div>
+    <div class="detail">بيانات الأسواق الحقيقية: ${realPairs.length ? `${realPairs.length} زوج — ${e(realPairs.slice(0, 8).map(pair).join('، '))}` : 'لسه مفيش (بتتسحب لوحدها وقت ما السوق يكون مفتوح: الكريبتو كل يوم، والعملات من الاتنين للجمعة)'}</div>
+    ${auditHtml(audit)}${auditReal ? `<h3 style="margin-top:14px">الأسواق الحقيقية</h3>${auditHtml(auditReal)}` : ''}
+    <h2 style="margin-top:18px">التاريخ المشابه والأنماط</h2>
+    ${model ? `<div class="detail">آخر نموذج: ${e(model.id)} · ${new Date(model.builtAt).toLocaleString()}</div>` : ''}
+    ${resHtml}
+    <details><summary>البيانات المخزنة لكل زوج</summary><div class="tablewrap"><table><tr><th>الزوج</th><th class="n">ساعات 5 ثوانٍ</th><th class="n">شموع الدقيقة</th><th>من</th><th>إلى</th></tr>
+      ${pairs.map((a) => `<tr><td class="pairname">${e(pair(a))}</td><td class="n">${ds.s5[a]?.hours ?? 0}</td><td class="n">${ds.m1[a]?.candles ?? 0}</td><td>${time(Math.min(ds.s5[a]?.from ?? Infinity, ds.m1[a]?.from ?? Infinity))}</td><td>${time(Math.max(ds.s5[a]?.to ?? 0, ds.m1[a]?.to ?? 0))}</td></tr>`).join('') || '<tr><td colspan="5" class="dim">لا توجد بيانات بعد.</td></tr>'}</table></div></details>`;
+}
+// OTC Randomness & Edge Audit (engine/audit.js, run in research-worker.js): one question — is there a measurable,
+// repeatable edge that beats PO's payout? Every hypothesis, the corrections, the null tests, the verdict.
+const AUDIT_VERDICT = {
+  EDGE_FOUND: ['ok', 'توجد ميزة قابلة للقياس', 'نتيجة واحدة على الأقل صمدت للتصحيح، وعلى بيانات جديدة، وفي نصّيها، وفوق نقطة التعادل. تُختبر في الظل قبل أي تداول.'],
+  WEAK_EVIDENCE: ['warn', 'دليل ضعيف', 'في نتايج صمدت للتصحيح لكنها أضعف من نقطة التعادل — مش بتكسب بعد نسبة المنصة.'],
+  NO_EDGE_FOUND: ['bad', 'لا توجد ميزة قابلة للقياس', 'مفيش تداول لأن مفيش ميزة اتقاست. ده نتيجة صحيحة، مش عطل.'],
+  INSUFFICIENT_DATA: ['dim', 'بيانات غير كافية', 'محتاج داتا أكتر قبل أي حكم.'],
+};
+const AUDIT_FAM = { memory: 'ذاكرة الاتجاه', conditional: 'بعد حركة بحجم معيّن', extremes: 'الحركات الشاذة', regime: 'حالات السوق', distribution: 'توزيع الحركات',
+  time: 'الوقت (ثانية/دقيقة/ساعة/يوم)', candle: 'مكان الحركة جوه الشمعة وشكلها', stability: 'ثبات السلوك عبر الفترات', features: 'خصائص حالة السوق', 'cross-pair': 'الأزواج مع بعض',
+  volatility: 'حجم الحركة (مش اتجاهها)', copy: 'إشارات النسخ', 'platform-signal': 'إشارات المنصة', 'entry-timing': 'توقيت الدخول', expiry: 'مدة الصفقة', 'after-entry': 'اللي بيحصل بعد الدخول' };
+const AUDIT_ST = { STRONG_EDGE: 'ميزة قوية', WEAK_EDGE: 'ميزة تحت التعادل', NO_EDGE: 'لا ميزة', NOISY_RESULT: 'ضوضاء (اختفت بعد التصحيح)', OVERFIT: 'مفصّلة على الماضي',
+  INSUFFICIENT_DATA: 'عينة صغيرة', UNSTABLE: 'مش ثابتة', PERIOD_SPECIFIC: 'في فترة بعينها', REGIME_SPECIFIC: 'في حالة سوق بعينها', STRUCTURE_NOT_DIRECTIONAL: 'في الحجم مش الاتجاه' };
+const NULL_AR = { permutation: 'ترتيب عشوائي', bootstrap: 'سحب عشوائي', sign: 'اتجاه بالصدفة', block: 'كتل بالصدفة', gauss: 'عشوائي طبيعي' };
+function auditHtml(rep) {
+  if (!rep) return '<p class="note">لم يُشغَّل التدقيق بعد.</p>';
+  const [cls, title, sub] = AUDIT_VERDICT[rep.verdict.status] || ['dim', rep.verdict.status, ''];
+  const t = rep.tests, sec = (x) => (x == null ? '–' : x < 60 ? `${x} ث` : `${x / 60} د`), be = (P) => (100 / (1 + P / 100)).toFixed(2);
+  const dq = [5, 60].map((tf) => { const d = rep.dataset[tf]; if (!d?.candles) return ''; const x = d.distribution || {};
+    return `<tr><td>${tf === 5 ? '5 ثوانٍ' : 'دقيقة'}</td><td class="n">${d.pairs}</td><td class="n">${d.candles.toLocaleString()}</td><td class="n">${d.hours}</td><td class="n">${d.completeness ?? '–'}%</td><td class="n">${d.gaps}</td>
+      <td class="n">${d.duplicates}</td><td class="n">${d.invalid}</td><td class="n">${d.flatRuns}</td><td class="n">${d.jumps10}</td><td class="n">${x.kurtosis ?? '–'}</td><td class="n">${x.skew ?? '–'}</td><td class="n">${x.upByHalf ? x.upByHalf.join(' / ') : '–'}</td></tr>`; }).join('');
+  const nz = rep.noise?.permutation, ng = rep.noise?.gauss;
+  const fams = Object.entries(t.byFamily).sort((a, b) => b[1].significant - a[1].significant || b[1].tests - a[1].tests);
+  const eng = rep.engines?.compare || {};
+  const row = (r) => `<tr><td><span class="pill ${r.status === 'STRONG_EDGE' ? 'VALIDATED' : r.status === 'OVERFIT' || r.status === 'UNSTABLE' ? 'REJECTED' : ''}">${e(AUDIT_ST[r.status] || r.status)}</span></td><td>${e(AUDIT_FAM[r.family] || r.family)}</td>
+    <td dir="ltr" style="text-align:left">${e(r.label)}</td><td>${r.tf === 1 ? '–' : r.tf === 5 ? '5ث' : '1د'} ${r.h != null ? `· ${sec(r.tf === 1 ? r.h : r.h * r.tf)}` : ''}</td><td class="n">${r.n}</td>
+    <td class="n">${r.oos ? `${r.oos.rate}%` : r.stat}</td><td class="n dim">${r.halves ? r.halves.map((h) => (h == null ? '–' : h + '%')).join(' / ') : ''}</td><td class="n dim">${r.q != null ? r.q.toPrecision(2) : '–'}</td><td class="n dim">${r.qAll != null ? r.qAll.toPrecision(2) : '–'}</td></tr>`;
+  const sig = (rep.rows || []).filter((r) => r.significant && r.directional).sort((a, b) => a.q - b.q).slice(0, 40);
+  const kept = [...(rep.verdict.edges || []), ...(rep.verdict.familyOnly || [])].map((x) => { const r = (rep.rows || []).find((y) => y.id === x.id) || x;
+    return `<br>• <span dir="ltr">${e(r.label)}</span>: ${r.oos ? `${r.oos.rate}% من ${r.n}` : ''}${r.halves ? ` (النصّين ${r.halves.join(' / ')}%)` : ''} · أقل حد ${r.lo ?? '–'}% · ${r.qAll != null && r.qAll >= 0.05 ? '<span class="warn">صمد جوه عيلته بس، مش بعد تصحيح كل الاختبارات</span>' : 'صمد بعد تصحيح كل الاختبارات'}${r.notOffered ? ' · المنصة مافيهاش المدة دي' : ''}`; }).join('');
+  return `<div class="detail" style="white-space:normal"><b class="${cls}" style="font-size:1.25em">${title}</b><br>${sub}${kept ? `<br><b>اللي صمد للتصحيح:</b>${kept}` : ''}</div>
+    <div class="detail" style="white-space:normal">
+      اتجرّب <b>${t.total.toLocaleString()}</b> فرضية (${t.directional.toLocaleString()} منهم عن الاتجاه). ${t.nominal} طلعت "مهمة" قبل التصحيح — والصدفة لوحدها بتطلّع حوالي ${t.expectedByChance}.
+      بعد تصحيح تعدد الاختبارات جوه كل عيلة فضل ${t.significant} (${t.significantDirectional} عن الاتجاه)، وبعد التصحيح على كل الاختبارات مع بعض ${t.significantGlobal}. اللي عدّى نقطة التعادل على بيانات جديدة وفي نصّيها: ${t.byStatus.STRONG_EDGE || 0}.
+      ${nz ? `<br>نفس التدقيق على بياناتك بعد خلطها عشوائيًا (مفيش فيها أي نمط أكيد): فضل ${nz.significant} نتيجة عن الاتجاه (عندك ${nz.otc.significant})، وأحسن نتيجة على بيانات جديدة ${nz.bestOos}% في العشوائي مقابل ${nz.otc.bestOos}% عندك${ng ? ` · عشوائي طبيعي: ${ng.significant} و${ng.bestOos}%` : ''}.` : ''}
+      <br>نقطة التعادل: ${rep.economics.map((x) => `ربح ${x.payout}% ← ${x.breakEven.toFixed(2)}%`).join(' · ')}.
+      <br><span class="dim">آخر تدقيق: ${new Date(rep.builtAt).toLocaleString()} · ${rep.secs} ث${rep.dataset[5]?.from ? ` · البيانات من ${time(rep.dataset[5].from)} لـ ${time(rep.dataset[5].to)}` : ''}</span></div>
+    <h3>سلامة البيانات</h3>
+    <div class="tablewrap"><table><tr><th>الفريم</th><th class="n">أزواج</th><th class="n">شموع</th><th class="n">ساعات</th><th class="n">اكتمال</th><th class="n">فجوات</th><th class="n">تكرار</th><th class="n">شموع غلط</th><th class="n">سعر واقف</th><th class="n">قفزات &gt;10σ</th><th class="n">التفرطح (طبيعي 3)</th><th class="n">الالتواء</th><th class="n">نسبة الصعود (نص أول / تاني)</th></tr>${dq}</table></div>
+    <h3>كل عيلة فرضيات</h3>
+    <div class="tablewrap"><table><tr><th>العيلة</th><th class="n">فرضيات</th><th class="n">مهمة قبل التصحيح</th><th class="n">بعد التصحيح</th><th>أحسن نتيجة على بيانات جديدة</th></tr>
+      ${fams.map(([k, f]) => `<tr><td>${e(AUDIT_FAM[k] || k)}</td><td class="n">${f.tests}</td><td class="n">${f.nominal}</td><td class="n ${f.significant ? 'warn' : ''}">${f.significant}</td>
+        <td class="dim" dir="ltr" style="text-align:left">${f.best ? `${e(f.best.label)} — ${f.best.oos.rate}% of ${f.best.n} (${e(AUDIT_ST[f.best.status] || f.best.status)})` : '–'}</td></tr>`).join('')}</table></div>
+    <h3>أحسن نتيجة لكل مدة — بالفلوس</h3>
+    <div class="tablewrap"><table><tr><th>المدة</th><th>الفرضية</th><th class="n">أصابت (جديد)</th><th class="n">عينة</th>${rep.economics.map((x) => `<th class="n">ربح ${x.payout}%</th>`).join('')}<th>الحكم</th></tr>
+      ${rep.bestByHorizon.map((b) => `<tr><td>${sec(b.sec)}</td><td class="dim" dir="ltr" style="text-align:left">${e(b.label)}</td><td class="n">${b.oos.rate}%</td><td class="n">${b.n}</td>
+        ${rep.economics.map((x) => `<td class="n ${['STRONG_EDGE', 'WEAK_EDGE', 'REGIME_SPECIFIC'].includes(b.status) && (rep.rows || []).find((y) => y.id === b.id)?.qAll < 0.05 ? (b.ev[x.payout] > 0 ? 'ok' : 'bad') : 'dim'}">${b.ev[x.payout] > 0 ? '+' : ''}${(b.ev[x.payout] * 100).toFixed(1)}%</td>`).join('')}<td>${e(AUDIT_ST[b.status] || b.status)}</td></tr>`).join('')}</table></div>
+    <p class="note">العائد المتوقع لكل صفقة = نسبة الإصابة × الربح − نسبة الخسارة. ده أحسن رقم لكل مدة من بين آلاف الفرضيات، فهو متفائل بطبيعته؛ الأرقام رمادي لما النتيجة ماصمدتش للتصحيح.</p>
+    <h3>اختبار الصفر: محركات البحث عن الأنماط على عشوائي</h3>
+    <div class="tablewrap"><table><tr><th>الفريم</th><th>المقياس</th><th class="n">بياناتك</th><th class="n">العشوائي (أقل–أعلى)</th><th>أحسن من كل العشوائي؟</th></tr>
+      ${Object.entries(eng).flatMap(([tf, c]) => [['أحسن إصابة للتاريخ المشابه %', c.bestHit], ['خلايا صمدت بعد التصحيح', c.significantCells], ['أنماط مكتشفة صمدت', c.patternsHolding], ['استراتيجيات عدّت كل المراحل', c.strategiesPassed]]
+        .filter(([, x]) => x).map(([lab, x]) => `<tr><td>${+tf === 5 ? '5 ثوانٍ' : 'دقيقة'}</td><td>${lab}</td><td class="n">${x.real}</td><td class="n">${x.nullMin}–${x.nullMax}</td><td class="${x.beatsAll ? 'warn' : 'dim'}">${x.beatsAll ? `أيوه — بس ده بيحصل بالصدفة ${Math.round((x.byLuck ?? 0.17) * 100)}% من المرات` : 'لأ'}</td></tr>`)).join('') || '<tr><td colspan="5" class="dim">لم يُشغَّل.</td></tr>'}</table></div>
+    <p class="note">العشوائي = نفس أزواجك ونفس أوقاتك ونفس أحجام الحركة، بس من غير أي نمط (${Object.values(NULL_AR).join('، ')}). لو المحرك لقى في العشوائي قد اللي لقاه عندك، يبقى اللي لقاه عندك صدفة.</p>
+    ${[5, 60].map((tf) => rep.dataset[tf]?.periods ? `<div class="detail">فترات ${tf === 5 ? '5 ثوانٍ' : 'الدقيقة'} (أ–د): ${rep.dataset[tf].periods.map((p, i) => `${'أبجد'[i]}: صعود ${p.up}% · استمرار ${p.continuation}% · حجم ${p.size}`).join(' | ')}</div>` : '').join('')}
+    <details><summary>النتايج اللي صمدت للتصحيح (عن الاتجاه) — ${sig.length}</summary><div class="tablewrap"><table><tr><th>الحكم</th><th>العيلة</th><th>الفرضية</th><th>الفريم · المدة</th><th class="n">عينة</th><th class="n">النتيجة</th><th class="n">النصّين</th><th class="n">q العيلة</th><th class="n">q الكل</th></tr>
+      ${sig.map(row).join('') || '<tr><td colspan="9" class="dim">ولا واحدة.</td></tr>'}</table></div></details>`;
+}
+// Strategies discovered from the same market states (engine/discovery*.js on the research dataset).
+function discSummary(d, strategies) {
+  if (!d) return '';
+  if (d.skipped) return `<div class="detail">اكتشاف الاستراتيجيات: بيانات قليلة (${e(d.skipped)}).</div>`;
+  const ST = { PAPER_TEST: 'في الاختبار الحي (في الظل)', OUT_OF_SAMPLE: 'تنتظر بيانات جديدة', VALIDATING: 'تنتظر بيانات تحقق', OVERFIT: 'مفصّلة على الماضي', REJECTED: 'مرفوضة',
+    UNSTABLE: 'غير مستقرة', DECAYING: 'تراجعت', INSUFFICIENT_DATA: 'عينة صغيرة' };
+  const rows = (d.paperTest || []).map((p) => { const row = strategies.find((x) => x.strategy_id === p.id); return `<br>${e(p.id)} · ${e(row ? AR.discName(row) : p.name)} · ${e(AR.duration(p.expiry * (row?.tf || 5)))} · جديد ${p.oos?.wr != null ? p.oos.wr.toFixed(1) + '%' : '–'} من ${p.oos?.n ?? 0}`; }).join('');
+  return `<div class="detail">اكتشاف الاستراتيجيات من حالات السوق (${d.rows} حالة): ${d.tested} قاعدة · ${Object.entries(d.byStatus || {}).map(([k, v]) => `${e(ST[k] || k)} ${v}`).join(' · ') || 'لا شيء'}
+    ${rows ? `<br><b>عدّت كل المراحل وتُختبر الآن في الظل (لا تُنفَّذ قبل ثبوتها حيًا واعتمادك):</b>${rows}` : '<br>لا قاعدة عدّت كل المراحل.'}</div>`;
+}
+function bindHistorical() {
+  const c = S.snap?.cfg?.collector || OTC.DEFAULT_CONFIG.collector;
+  $('#hCollect').onclick = () => { send({ type: 'setConfig', patch: { collector: { on: !c.on } } }); setTimeout(renderResearch, 400); };
+  $('#hStop').onclick = () => { H.worker?.postMessage({ type: 'stop' }); histLog('جاري الإيقاف…'); };
+  const worker = () => {
+    H.worker ||= new Worker('../research-worker.js');
+    H.worker.onmessage = ({ data: m }) => {
+      if (m.type === 'progress') histLog(m.text);
+      else if (m.type === 'done' && m.kind === 'audit') { histLog(`انتهى التدقيق (${m.market === 'real' ? 'الأسواق الحقيقية' : 'OTC'}): ${(AUDIT_VERDICT[m.verdict] || [])[1] || m.verdict}`); renderResearch(); }
+      else if (m.type === 'done') { histLog('انتهى البحث — تم حفظ نموذج جديد'); send({ type: 'researchUpdated' }); renderResearch(); }
+      else if (m.type === 'stopped') histLog('توقف');
+      else if (m.type === 'error') histLog(`خطأ: ${m.error.split('\n')[0]}`);
+    };
+    return H.worker;
+  };
+  $('#hRun').onclick = () => {
+    histLog('بدأ البحث…');
+    worker().postMessage({ type: 'run', payout: (S.snap?.pairs || []).find((p) => p.payout)?.payout || S.snap?.cfg?.gate?.minPayout || 85 });
+  };
+  $('#aRun').onclick = async () => {
+    histLog('بدأ التدقيق…');
+    let sigStats = {};
+    try { sigStats = (await chrome.storage.local.get(['sigStats'])).sigStats || {}; } catch (_) {}
+    worker().postMessage({ type: 'audit', market: $('#aMarket').value, sigStats, cfg: S.snap?.cfg ? { discovery: S.snap.cfg.discovery } : {} });
+  };
+  $('#aStop').onclick = () => { H.worker?.postMessage({ type: 'stop' }); histLog('جاري الإيقاف…'); };
+}
+
 async function renderResearch() {
   const el = $('#view-research');
   const candles = await DB.all('candles');
   const byAsset = {};
   for (const c of candles) (byAsset[c.asset] ||= []).push(c);
   const known = [...new Set([...Object.keys(byAsset), ...(S.snap?.pairs || []).map((p) => p.asset)])].sort();
-  el.innerHTML = `<h2>البيانات التاريخية</h2>
+  el.innerHTML = `${await historicalHtml()}
+    <details style="margin-top:18px"><summary>إعادة تشغيل شموع 5 دقائق عبر محرك الاستراتيجيات (الأداة القديمة)</summary>
+    <h2>البيانات التاريخية</h2>
     <p class="note">1) حمّل تاريخ شموع 5 دقائق عبر أي تبويب Pocket Option مفتوح (يمكنه تحميل أي زوج OTC، لا الزوج المعروض فقط). 2) أعد تشغيله عبر نفس مسار التحليل الحي لإنشاء سجلات اختبار تاريخي. الاختبار التاريخي يفترض الدخول عند إغلاق الشمعة ولا يحاكي توقيت الدخول ولا تأكيد الدقيقة ولا إشارات المنصة — اعتبر نتائجه متفائلة.</p>
     <div class="row">
       <label>الزوج (مثل EURUSD_otc)<input id="rAsset" list="assetList" dir="ltr" value="${e(known[0] || 'EURUSD_otc')}"><datalist id="assetList">${known.map((a) => `<option value="${e(a)}">`).join('')}</datalist></label>
@@ -530,7 +718,8 @@ async function renderResearch() {
           <td class="n">${R?.bigCandle.n ? `${f1(R.bigCandle.continued)}% من ${R.bigCandle.n}` : '–'}</td><td class="n">${R ? f1(R.bodyRatio, 2) : '–'}</td></tr>`;
       }).join('') || '<tr><td colspan="10" class="dim">لا توجد شموع مخزنة بعد.</td></tr>'}
     </table></div>
-    <p class="note">سلوك OTC كما تقيسه هذه الشموع، دون تفسيرات. ارتباط قريب من 0 = لا ذاكرة؛ سالب = يميل للانعكاس؛ موجب = يميل للاستمرار. نسبة "نفس اللون" قرب 50% تعني أن السلاسل لا تتنبأ بشيء؛ راجع حجم العينة قبل أي استنتاج.</p>`;
+    <p class="note">سلوك OTC كما تقيسه هذه الشموع، دون تفسيرات. ارتباط قريب من 0 = لا ذاكرة؛ سالب = يميل للانعكاس؛ موجب = يميل للاستمرار. نسبة "نفس اللون" قرب 50% تعني أن السلاسل لا تتنبأ بشيء؛ راجع حجم العينة قبل أي استنتاج.</p></details>`;
+  bindHistorical();
   const asset = () => $('#rAsset').value.trim();
   const rtf = () => +$('#rTf').value;
   const fetchFor = async (a) => { await fetchHist(a, +$('#rHours').value); if ($('#rM1').checked || rtf() === 60) await fetchHist(a, Math.min(+$('#rHours').value, 72), 60); };
@@ -663,7 +852,7 @@ async function renderDiscovery() {
       ${shown.slice(0, 300).map((r) => `<tr class="click" data-sid="${e(r.strategy_id)}"><td class="mono">${e(r.strategy_id)}${r.type === 'FILTER' ? ' <span class="pill">فلتر</span>' : ''}</td>
         <td>${e(AR.discName(r))}</td><td><span class="pill ${r.status}">${e(DST(r.status))}</span></td>
         <td class="n">${r.sample_size} <span class="dim">${e(SCLASS[r.sample_class] || '')}</span></td>
-        <td class="dim">${e((r.regime || r.regimes_covered || []).map(AR.regime).join('، ') || 'أي حالة')}</td><td class="n">${(r.expiry * (r.tf || 300)) / 60}د${r.tf && r.tf !== 300 ? ` <span class="dim">${e(AR.frame(r.tf))}</span>` : ''}</td>
+        <td class="dim">${e((r.regime || r.regimes_covered || []).map(AR.regime).join('، ') || 'أي حالة')}</td><td class="n">${e(AR.duration(r.expiry * (r.tf || 300)))}${r.tf && r.tf !== 300 ? ` <span class="dim">${e(AR.frame(r.tf))}</span>` : ''}</td>
         <td class="n">${sres(r.validation_results)}</td><td class="n">${sres(r.out_of_sample_results)}</td>
         <td class="n">${r.walk_forward ? sres(r.walk_forward) : '–'}</td><td>${e(ROBUST[r.robustness?.label] || '–')}</td><td class="n">${r.complexity ?? '–'}</td>
         <td class="dim">${e(CROSS[r.cross_pair] || '')}</td><td class="dim">${e(STAB[r.stability] || '')}</td>
@@ -747,7 +936,7 @@ function strategyDetail(r, versions) {
     <p class="dim mono" style="margin:2px 0">${e(r.status_reason || '')}</p>
     <p style="white-space:pre-line;margin:8px 0">${e(ex.text)}</p>
     <div class="two"><div>
-      <h3>الشروط (${dw(r.direction)}، مدة ${(r.expiry * (r.tf || 300)) / 60} دقيقة على فريم ${AR.frame(r.tf || 300)}${r.pairs ? `، فقط ${r.pairs.map(pair).join('، ')}` : ''})</h3>
+      <h3>الشروط (${dw(r.direction)}، مدة ${AR.duration(r.expiry * (r.tf || 300))} على فريم ${AR.frame(r.tf || 300)}${r.pairs ? `، فقط ${r.pairs.map(pair).join('، ')}` : ''})</h3>
       <ul class="ev">${ex.conditions.map((c) => `<li>${e(c)}</li>`).join('')}${ex.negatives.map((c) => `<li class="warn">تجنّب: ${e(c)}</li>`).join('')}</ul>
       <h3>النتائج</h3><table><tr><th></th><th class="n">العدد</th><th class="n">نجاح</th><th class="n">خسارة</th><th class="n">النجاح</th><th class="n">نطاق 90%</th><th class="n">العائد</th><th class="n">التعادل</th><th></th></tr>
         ${res('التدريب', r.training_results, `عينة ${SCLASS[r.sample_class] || ''}؛ تُرك ${r.training_results?.skipped ?? 0} متداخل؛ أسوأ سلسلة ${r.training_results?.maxConsecLoss ?? '–'} خسائر؛ أقصى تراجع ${r.training_results?.maxDrawdown ?? '–'}`)}
@@ -762,7 +951,7 @@ function strategyDetail(r, versions) {
       ${r.importance?.length ? `<h3>مساهمة كل شرط</h3><table><tr><th>الشرط</th><th class="n">ما يُفقد من الحد الأدنى بدونه</th><th class="n">النجاح بدونه</th></tr>${r.importance.map((x) => `<tr><td>${e(cond(x))}</td><td class="n ${x.low ? 'dim' : ''}">${x.drop.toFixed(1)} نقطة${x.low ? ' (ضعيفة)' : ''}</td><td class="n">${pct(x.wrWithout)} <span class="dim">من ${x.nWithout}</span></td></tr>`).join('')}</table>` : ''}
       ${r.robustness?.neighbors?.length ? `<h3>المتانة: ${e(ROBUST[r.robustness.label] || r.robustness.label)} (${Math.round(r.robustness.score * 100)}% من العتبات المحرّكة صمدت)</h3><table>${r.robustness.neighbors.map((x) => `<tr><td>${e(cond(x))}</td><td class="n">${pct(x.wr)} <span class="dim">من ${x.n}</span></td><td class="${x.pass ? 'ok' : 'bad'}">${x.pass ? 'صمد' : 'انهار'}</td></tr>`).join('')}</table>` : `<p class="dim">المتانة: ${e(ROBUST[r.robustness?.label] || '–')}${r.robustness?.label === 'N/A' ? ' — لا توجد عتبات رقمية لتحريكها' : ''}</p>`}
     </div><div>
-      ${bd('حسب حالة السوق', r.regime_breakdown, AR.regime)}${bd('حسب الزوج', r.pair_breakdown, pair)}${bd('حسب المدة', r.expiry_breakdown, (k) => `${(Number(String(k).slice(1)) * (r.tf || 300)) / 60} دقيقة`)}${bd('حسب الجلسة', r.session_breakdown, (k) => AR.featName && ({ Asia: 'آسيا', London: 'لندن', 'London/NY': 'لندن/نيويورك', 'New York': 'نيويورك', Late: 'متأخرة' }[k] || k))}${bd('حسب ثقة المحرك', r.score_breakdown)}
+      ${bd('حسب حالة السوق', r.regime_breakdown, AR.regime)}${bd('حسب الزوج', r.pair_breakdown, pair)}${bd('حسب المدة', r.expiry_breakdown, (k) => AR.duration(Number(String(k).slice(1)) * (r.tf || 300)))}${bd('حسب الجلسة', r.session_breakdown, (k) => AR.featName && ({ Asia: 'آسيا', London: 'لندن', 'London/NY': 'لندن/نيويورك', 'New York': 'نيويورك', Late: 'متأخرة' }[k] || k))}${bd('حسب ثقة المحرك', r.score_breakdown)}
       ${r.similar_library?.length ? `<p class="dim">يتداخل مع استراتيجيات موجودة: ${r.similar_library.map((x) => `${e(sname(x.strategy))} φ ${x.phi}`).join('، ')}</p>` : ''}
       <h3>القيود</h3><ul class="ev">${AR.discLimitations(r).map((x) => `<li>${e(x)}</li>`).join('')}</ul>
       <h3>سجل النسخ</h3><table><tr><th class="n">نسخة</th><th>الحالة</th><th>السبب</th><th>الوقت</th></tr>${versions.sort((a, b) => b.version - a.version || b.updated_at - a.updated_at).map((v) => `<tr><td class="n">${v.version}</td><td><span class="pill ${v.status}">${e(DST(v.status))}</span></td><td class="dim mono">${e(v.status_reason || '')}</td><td class="dim">${new Date(v.updated_at).toLocaleString('ar-EG-u-nu-latn')}</td></tr>`).join('')}</table>
@@ -783,7 +972,7 @@ function renderSettings() {
   el.innerHTML = `<h2>الإعدادات المتقدمة</h2>
     <p class="note">كل رقم هنا افتراض مبدئي. غيّر شيئًا واحدًا في كل مرة وقارن في الإحصائيات؛ ضبط إعدادات كثيرة على نفس البيانات هو الطريق إلى مطابقة الماضي فقط.</p>
     <h3>عتبات القرار</h3><div class="row">
-      ${num('watchThreshold', 'الماسح: متابعة ≥')}${num('deepThreshold', 'الماسح: تحليل عميق ≥')}${num('minDeepConfidence', 'أدنى ثقة للقرار')}${num('minStrategyScore', 'أدنى درجة للاستراتيجية')}
+      ${num('watchThreshold', 'الماسح: متابعة ≥')}${num('deepThreshold', 'الماسح: تحليل عميق ≥')}${num('minStrategyScore', 'أدنى درجة للاستراتيجية')}
       ${num('entryWindowSec', 'نافذة الدخول (ث)')}${num('maxChaseAtr', 'أقصى مطاردة (ATR)', 0.05)}${num('maxAdverseAtr', 'أقصى حركة عكسية (ATR)', 0.05)}${num('opposingLevelAtr', 'منع المستوى المعاكس (ATR)', 0.05)}
       ${num('paperExpiry', 'مدة الصفقة (شموع 5د)')}</div>
     <h3>الحماية</h3><div class="row">
@@ -826,3 +1015,51 @@ connect();
 render();
 // Snapshots redraw the live view when something changes; the 1s tick only drives confirmation countdowns.
 setInterval(() => { if (S.view === 'live' && S.snap?.manual.length) renderLive(); }, 1000);
+
+
+// ── loss review: for each strategy, why its trades lost and what would have worked ─────────────────────────
+const CAUSE_AR = { late: ['اتأخرنا في الدخول', '#f59e0b'], too_short: ['المدة كانت قصيرة', '#60a5fa'], too_long: ['المدة كانت طويلة', '#a78bfa'],
+  wrong_way: ['الاتجاه كان غلط', '#f87171'], platform: ['نتيجة المنصة غير السوق', '#fb7185'], chance: ['صدفة (مفيش مدة كانت هتكسب بوضوح)', '#6b7280'] };
+async function renderLosses() {
+  const el = $('#view-losses');
+  const recs = await DB.byIndex('records', 'kind', 'opp');
+  const rows = OTC.PostMortem.summary(recs);
+  const cfgNow = S.snap?.cfg || OTC.DEFAULT_CONFIG, offSet = new Set(cfgNow.soloOff || []), soloIds = new Set(OTC.YouTube?.ids() || []);
+  const autoLog = Object.fromEntries((cfgNow.soloAutoOffLog || []).map((x) => [x.id, x]));
+  // strategies of the mode with no trades yet still get a row, so they can be switched off before they trade
+  for (const id of soloIds) if (!rows.some((r) => r.setup === id)) rows.push({ setup: id, n: 0, W: 0, L: 0, T: 0, causes: {}, rate: {}, later: {}, reverse: { n: 0, rate: null }, losses: [], used: OTC.Strategies.get(id)?.expirySec || null, best: null });
+  const nameOf = (id) => (id === 'keltner_trend_pullback' ? 'كيلتنر 10د' : OTC.Strategies.get(id)?.name || id);
+  const dur = (s) => AR.duration(+s);
+  const bar = (rate) => rate == null ? '<span class="dim">–</span>' : `<span title="${rate}%" style="display:inline-block;width:46px;height:8px;border-radius:4px;background:#2a3040;overflow:hidden;vertical-align:middle"><i style="display:block;height:100%;width:${rate}%;background:${rate >= 52.1 ? '#34d399' : rate >= 48 ? '#fbbf24' : '#f87171'}"></i></span> <span class="dim">${rate}%</span>`;
+  const causeBar = (s) => { const L = s.L || 1; return `<div style="display:flex;height:12px;border-radius:6px;overflow:hidden;min-width:160px">${OTC.PostMortem.CAUSES.filter((c) => s.causes[c]).map((c) => `<i title="${CAUSE_AR[c][0]}: ${s.causes[c]}" style="display:block;width:${(100 * s.causes[c]) / L}%;background:${CAUSE_AR[c][1]}"></i>`).join('')}</div>`; };
+  const sp = OTC.PostMortem.split(recs, { ids: [...soloIds] });
+  const cell = (label, c) => `<div style="display:inline-block;margin:0 14px 6px 0"><span class="dim">${label}</span> ${c.n ? `${bar(c.rate)} <span class="dim">(${c.n})</span>` : '<span class="dim">–</span>'}</div>`;
+  const splitBox = `<div class="detail" style="white-space:normal;line-height:2">
+      <b>على الشارت ولا بره الشارت</b> — الإحصائيات اللي تحت و«حسّن» بيحسبوا إشارات الشارت بس (هي اللي بتتنفذ):<br>
+      ${cell('إشارات زوج على الشارت', sp.chart)}${cell('إشارات زوج بره الشارت (مش بتتحسب)', sp.off)}<br>
+      <b>للمتابعة</b> (إشارات الشارت بس، ولسه مفيش قرار مبني عليها):<br>
+      ${cell('لوحدها', sp.agree.alone)}${cell('استراتيجية تانية متفقة', sp.agree.one)}${cell('2+ متفقين', sp.agree.more)}${cell('فيه عكسها', sp.agree.against)}<br>
+      ${cell('السوق هادي', sp.speed.slow)}${cell('عادي', sp.speed.normal)}${cell('سريع', sp.speed.fast)}</div>`;
+  const legend = OTC.PostMortem.CAUSES.map((c) => `<span style="display:inline-flex;align-items:center;gap:5px;margin-inline-end:12px"><i style="width:10px;height:10px;border-radius:3px;background:${CAUSE_AR[c][1]};display:inline-block"></i>${CAUSE_AR[c][0]}</span>`).join('');
+  el.innerHTML = `<h2>مراجعة الخسائر</h2>
+    <p class="note">كل صفقة بيتسجّل معاها سعر الإشارة والسعر بعد 5 ثوانٍ … 30 دقيقة، وسعر الفتح الحقيقي عند المنصة. من ده بيتعرف الصفقة الخسرانة كان المفروض فيها إيه: اتأخرنا؟ المدة قصيرة؟ طويلة؟ ولا الاتجاه نفسه غلط؟ "المدة الأحسن" بتظهر بس بعد 20 صفقة على الأقل — وأي مدة بتكسب في الماضي ممكن تكون صدفة.</p>
+    ${splitBox}
+    <div class="detail" style="white-space:normal">${legend}</div>
+    <div class="tablewrap"><table><tr><th>الاستراتيجية</th><th class="n">صفقات</th><th class="n">كسب</th><th class="n">خسارة</th><th>ليه خسرت</th><th>نسبة الكسب حسب المدة (من سعر الإشارة)</th><th>لو دخلنا عكسها</th><th>المدة الأحسن</th></tr>
+    ${rows.map((s) => `<tr><td>${e(nameOf(s.setup))}<div class="dim" style="font-size:11px">المدة المستخدمة: ${s.used ? dur(s.used) : '–'}</div>${soloIds.has(s.setup) ? `<button class="soloT" data-id="${e(s.setup)}" style="margin-top:4px;font-size:11px">${offSet.has(s.setup) ? '⛔ متوقفة — شغّلها' : '✓ شغالة — وقّفها'}</button>${autoLog[s.setup] ? `<div class="bad" style="font-size:10.5px">اتوقفت لوحدها: ${autoLog[s.setup].w} من ${autoLog[s.setup].n}</div>` : ''}` : ''}</td><td class="n">${s.n}</td><td class="n ok">${s.W}</td><td class="n bad">${s.L}</td><td>${s.L ? causeBar(s) : '<span class="dim">–</span>'}</td>
+      <td style="font-size:11px;line-height:1.9">${OTC.PostMortem.H.filter((h) => s.rate[h]).map((h) => `<div><b style="display:inline-block;width:34px">${+h < 60 ? `${h}ث` : `${+h / 60}د`}</b>${bar(s.rate[h].rate)} <span class="dim">(${s.rate[h].n})</span>${+h === s.used ? ' ◀' : ''}</div>`).join('')}</td>
+      <td>${bar(s.reverse.rate)} <span class="dim">(${s.reverse.n})</span></td>
+      <td>${s.best ? `<b>${dur(s.best.sec)}</b>: ${s.best.rate}% من ${s.best.n}${s.best.current != null && s.best.sec !== s.used ? `<div class="dim">بدل ${s.best.current}% على ${dur(s.used)}</div>` : ''}` : '<span class="dim">محتاج 20 صفقة</span>'}</td></tr>`).join('') || '<tr><td colspan="8" class="dim">لسه مفيش صفقات متسجلة.</td></tr>'}</table></div>
+    <p class="note">أي استراتيجية من الوضع توصل ${cfgNow.soloAutoOff?.minN ?? 20} صفقة متنفذة ونسبتها أقل من ${cfgNow.soloAutoOff?.below ?? 50}% بتتوقف لوحدها. تقدر تشغّلها أو توقفها بإيدك من الزرار.</p>
+    <h3>آخر الصفقات الخسرانة</h3>
+    <div class="tablewrap"><table><tr><th>الوقت</th><th>الزوج</th><th>الاستراتيجية</th><th>الاتجاه</th><th>المدة</th><th>السبب</th><th>كان المفروض</th><th class="n">تأخير الدخول</th></tr>
+    ${rows.flatMap((s) => s.losses).sort((a, b) => b.ts - a.ts).slice(0, 40).map((a) => `<tr><td>${time(a.ts)}</td><td class="pairname">${e(pair(a.asset))}</td><td>${e(nameOf(a.setup))}</td><td>${AR.dir(a.dir)}</td><td>${dur(a.expirySec)}</td>
+      <td><span style="color:${CAUSE_AR[a.cause]?.[1] || '#ccc'}">${CAUSE_AR[a.cause]?.[0] || '–'}</span>${a.placed ? '' : ' <span class="dim">(ورقي)</span>'}</td>
+      <td>${a.cause === 'too_short' || a.cause === 'too_long' ? `مدة ${dur(a.better)}` : a.cause === 'late' ? 'الدخول على سعر الإشارة كان كسب' : a.cause === 'wrong_way' ? 'العكس' : '–'}</td>
+      <td class="n">${a.delaySec != null ? `${a.delaySec} ث` : '–'}</td></tr>`).join('') || '<tr><td colspan="8" class="dim">مفيش صفقات خسرانة.</td></tr>'}</table></div>`;
+  el.querySelectorAll('.soloT').forEach((btn) => (btn.onclick = () => {
+    const id = btn.dataset.id, off = new Set((S.snap?.cfg || OTC.DEFAULT_CONFIG).soloOff || []);
+    if (off.has(id)) off.delete(id); else off.add(id);
+    send({ type: 'setConfig', patch: { soloOff: [...off] } }); setTimeout(renderLosses, 500);
+  }));
+}

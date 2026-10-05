@@ -69,6 +69,9 @@
     { id: 'pair_setup', key: (c) => `${c.frame}|${c.setup}|${c.dir}|*|${c.asset}` },         // pair + strategy + frame + direction
     { id: 'setup_regime', key: (c) => `${c.frame}|${c.setup}|${c.dir}|${c.regime}` },       // strategy + frame + direction + regime
     { id: 'setup', key: (c) => `${c.frame}|${c.setup}|${c.dir}` },                          // strategy + frame + direction
+    // how many strategy families agreed (engine/consensus.js) + frame + direction: does this KIND of agreement pay?
+    // (opportunities from v0.11 on; copy signals have their own cohorts)
+    { id: 'consensus', key: (c) => (c.ff ? `${c.frame}|F${c.ff}|${c.dir}` : null) },
     { id: 'kind_regime', key: (c) => `${c.frame}|k:${c.kind}|${c.dir}|${c.regime}` },       // strategy family + frame + regime
     { id: 'kind', key: (c) => `${c.frame}|k:${c.kind}|${c.dir}` },                          // strategy family + frame
     { id: 'frame', key: (c) => `${c.frame}|*|${c.dir}` },                                   // broader population of the frame
@@ -84,18 +87,19 @@
   function member(r) {
     const dir = r.lean || (r.decision !== 'SKIP' ? r.decision : null);
     if (!dir || !r.setup || r.status === 'unresolved') return null;
+    const ff = r.origin !== 'copy' && r.cons?.dir === dir && r.cons.ff ? Math.min(r.cons.ff, 5) : null; // families that agreed
     if (r.kind === 'opp') {
       if (!r.path?.some((s) => s === 'ENTERED' || s === 'GATED')) return null;
       const h = {}, unit = r.tf || 60;
       for (const [k, px] of Object.entries(r.exits || {})) if (px != null) h[k * unit] = px;
-      return { source: 'entries', w: 1, ts: r.ts, frame: r.frame, setup: r.setup, kind: r.setupKind || r.facts?.kind || 'trend', dir, regime: r.regime, asset: r.asset, entry: r.entryPrice, h, payout: r.payout };
+      return { source: 'entries', w: 1, ts: r.ts, frame: r.frame, setup: r.setup, kind: r.setupKind || r.facts?.kind || 'trend', dir, regime: r.regime, asset: r.asset, entry: r.entryPrice, h, payout: r.payout, ff };
     }
     const tf = r.tf || 300;
     if (!(r.strategies || []).some((s) => s[0] === r.setup && s[1] === dir && s[3])) return null;
     const h = {};
     for (const [N, px] of Object.entries(r.exits || {})) if (px != null) h[N * tf] = px;
     return { source: 'setups', w: r.source === 'backtest' ? 0.5 : 1, ts: r.ts, frame: tf, setup: r.setup, kind: r.facts?.kind || OTC.Facts?.setupKind?.(r.setup) || 'trend',
-      dir, regime: r.regime, asset: r.asset, entry: r.entryPrice, h, payout: r.payout };
+      dir, regime: r.regime, asset: r.asset, entry: r.entryPrice, h, payout: r.payout, ff };
   }
   const outcomeOf = (m, sec) => {
     const px = m.h[sec];
@@ -117,6 +121,7 @@
       members++; first = Math.min(first, m.ts); last = Math.max(last, m.ts);
       for (const L of LEVELS) {
         const k = L.key(m);
+        if (k == null) continue;
         const map = groups[m.source];
         if (!map.has(k)) map.set(k, []);
         map.get(k).push(m);
@@ -168,23 +173,37 @@
     return out;
   }
 
-  // c: { frame, setup, kind, dir, regime, asset, payout }
+  // c: { frame, setup, kind, dir, regime, asset, payout, ff (families that agreed, if any) }
   // Returns { status: 'MEASURED' | 'INSUFFICIENT_DATA', measured, reason, winProb, interval, ev, evLo, p, n, oos,
   //           stable, folds, level, source, key, expirySec, expiry, be, version }.
-  function assess(c, tables, { cfg = OTC.DEFAULT_CONFIG, available = null, expiryOpts = {} } = {}) {
+  // sources / levels: restrict which cohorts may be used (copy signals use only their own).
+  // learnDirection: the older part of each cohort also decides whether this kind of opportunity is traded WITH its
+  // setup or AGAINST it (the same outcomes read the other way) — OTC prices were seen to reverse after strong
+  // agreement for hours at a time. The newer part then measures the chosen direction: no selection on it.
+  // Result: reversed true = trade the opposite of c.dir; winProb, ev … are for the direction to trade.
+  function assess(c, tables, { cfg = OTC.DEFAULT_CONFIG, available = null, expiryOpts = {}, sources = ['entries', 'setups'], levels = null, learnDirection = false } = {}) {
     const g = cfg.gate, pay = c.payout ?? 85, be = U.breakEven(pay);
     const choose = (history) => OTC.Expiry.choose({ tf: c.frame, kind: c.kind, available, history, cfg, ...expiryOpts });
     // cohorts with enough out-of-sample outcomes, most specific first (live entries before research setups)
     const cands = [];
-    for (const src of ['entries', 'setups']) for (const L of LEVELS) {
-      const t = tables?.[src]?.[L.key(c)];
+    for (const src of sources) for (const L of LEVELS) {
+      if (levels && !levels.includes(L.id)) continue;
+      const key = L.key(c);
+      const t = key == null ? null : tables?.[src]?.[key];
       if (t && Math.max(...Object.values(t).map((x) => x.oos[0] + x.oos[1])) >= g.minOOS) cands.push({ src, L, t });
     }
-    const evaluate = ({ src, L, t }) => {
-      // the duration is chosen on the older part only (train), then locked
-      const ex = choose((sec) => { const x = t[sec]; if (!x) return null; const n = x.sel[0] + x.sel[1]; if (!n) return null;
-        return { n, wr: (100 * x.sel[0]) / n, lo: OTC.Stats.wilson(x.sel[0], n).lo, be }; });
-      const x = t[ex.sec], base = { expirySec: ex.sec, expiry: { source: ex.source, reason: ex.reason }, source: src, level: L.id, key: L.key(c) };
+    const pick = (t) => choose((sec) => { const x = t[sec]; if (!x) return null; const n = x.sel[0] + x.sel[1]; if (!n) return null;
+      return { n, wr: (100 * x.sel[0]) / n, lo: OTC.Stats.wilson(x.sel[0], n).lo, be }; });
+    const mirror = (t) => Object.fromEntries(Object.entries(t).map(([sec, x]) => [sec, { sel: [x.sel[1], x.sel[0]], oos: [x.oos[1], x.oos[0]], folds: x.folds.map(([w, l]) => [l, w]), n: x.n }]));
+    const selWr = (t, sec) => { const x = t[sec], n = x ? x.sel[0] + x.sel[1] : 0; return n ? x.sel[0] / n : null; };
+    const evaluate = ({ src, L, t: t0 }) => {
+      // the duration (and, learning direction, the direction) is chosen on the older part only (train), then locked
+      let t = t0, ex = pick(t0), reversed = false;
+      if (learnDirection) {
+        const r = mirror(t0), exR = pick(r), wf = selWr(t0, ex.sec), wr = selWr(r, exR.sec);
+        if (wr != null && wr > 0.5 && (wf == null || wr > wf)) { t = r; ex = exR; reversed = true; }
+      }
+      const x = t[ex.sec], base = { expirySec: ex.sec, expiry: { source: ex.source, reason: ex.reason }, source: src, level: L.id, key: L.key(c), reversed };
       if (!x || x.oos[0] + x.oos[1] < g.minOOS) return { ...base, measured: false };
       // …and measured on the newer part (out-of-sample)
       const [w, l] = x.oos, n = w + l, a = g.priorStrength * (be / 100) + w, b = g.priorStrength * (1 - be / 100) + l;
@@ -205,8 +224,17 @@
     const r = chosen || firstMeasured;
     if (!r) {
       const ex = choose(null);
+      // how far the most advanced similar cohort is, at this duration: outcomes so far / outcomes needed
+      // (minOOS in the newer part = minOOS / (1 − selFraction) in all)
+      let have = 0;
+      for (const src of sources) for (const L of LEVELS) {
+        if (levels && !levels.includes(L.id)) continue;
+        const key = L.key(c), x = key == null ? null : tables?.[src]?.[key]?.[ex.sec];
+        if (x) have = Math.max(have, Math.round(x.n));
+      }
       return { status: 'INSUFFICIENT_DATA', measured: false, reason: cands.length ? 'no_history_at_duration' : 'no_history', winProb: null, interval: null, ev: null, evLo: null,
-        p: 0, n: 0, oos: null, stable: null, folds: null, level: null, source: null, key: null, expirySec: ex.sec, expiry: { source: ex.source, reason: ex.reason }, be, version: tables?.version ?? null };
+        p: 0, n: 0, oos: null, stable: null, folds: null, level: null, source: null, key: null, expirySec: ex.sec, expiry: { source: ex.source, reason: ex.reason }, be, version: tables?.version ?? null,
+        have, need: Math.ceil(g.minOOS / (1 - g.selFraction)) };
     }
     return { ...r, status: 'MEASURED', reason: r.stable ? 'measured' : 'unstable', be, version: tables?.version ?? null };
   }
@@ -218,12 +246,15 @@
   // win rate upper bound below break-even → REJECTED, lower bound above → CONFIRMED.
   function monitor(records, cfg = OTC.DEFAULT_CONFIG) {
     const g = cfg.gate;
+    // judged on the recent window only: a model rejected on old entries is re-judged once they age out
+    const newest = records.reduce((m, r) => Math.max(m, r.ts || 0), 0), since = newest - (g.monitorWindowH ?? 48) * 3600;
+    records = records.filter((r) => (r.ts || 0) >= since);
     const rows = [[null, null], [0, 50], [50, 55], [55, 60], [60, 65], [65, 101]].map(([lo, hi]) => ({ lo, hi, w: 0, l: 0, t: 0, pay: [], pred: [] }));
     const top = { w: 0, l: 0, t: 0, pay: [], pred: [] };
     const add = (b, o, pay, pred) => { b[{ W: 'w', L: 'l', T: 't' }[o]]++; b.pay.push(pay ?? 85); if (pred != null && o !== 'T') b.pred.push(pred); };
     for (const r of records) {
       if (r.kind !== 'opp' || !r.cal || !r.expirySec || !r.path?.some((s) => s === 'ENTERED' || s === 'GATED')) continue;
-      const o = OTC.Stats.outcome(r, r.lean, r.expirySec / (r.tf || 60));
+      const o = OTC.Stats.outcome(r, r.fade ? U.opp(r.lean) : r.lean, r.expirySec / (r.tf || 60)); // a reversed entry traded the other way
       if (!o) continue;
       const measured = r.cal.measured ?? (r.cal.reason === 'measured' || r.cal.reason === 'unstable');
       const pred = r.cal.winProb ?? null;

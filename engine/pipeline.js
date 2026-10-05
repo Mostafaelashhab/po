@@ -36,7 +36,16 @@
     const f60 = series[TF.MACRO] ? OTC.Features.compute(series[TF.MACRO], TF.MACRO, opt) : null;
     const f1 = series[TF.TIMING] ? OTC.Features.compute(series[TF.TIMING], TF.TIMING, opt) : null;
     const regime = OTC.Regime.classify(f5, f15, f60);
-    return { f5, f15, f60, f1, regime, levels: mergedLevels(f5, f15, f60), signal, cfg };
+    // the market state of the setup frame (engine/research.js) — the same one research and discovery are built on
+    let state = null;
+    const R = OTC.Research, cs = (series[TF.PRIMARY] || []).filter((c) => !c.partial);
+    if (R && cs.length > R.DEFAULTS.W) {
+      let i = cs.length - 1;
+      while (i > 0 && cs[i].time - cs[i - 1].time === TF.PRIMARY) i--;
+      const seg = cs.slice(i);
+      if (seg.length > R.DEFAULTS.W) state = R.stateAt(seg, seg.length - 1, TF.PRIMARY);
+    }
+    return { f5, f15, f60, f1, regime, levels: mergedLevels(f5, f15, f60), signal, cfg, state };
   }
 
   // ── FAST SCANNER ───────────────────────────────────────────────────────────
@@ -78,56 +87,84 @@
 
   // ── DEEP ANALYZER + FINAL DECISION ─────────────────────────────────────────
   // opts: dq (DataQuality.checkSnapshot result), scan (fastScan result), timing (Risk.entryTiming result or null),
-  //       meta ({ asset, time, candleTime }; live only — lets discovered strategies run on top)
+  //       meta ({ asset, time, candleTime }; live only — lets discovered strategies run on top),
+  //       reliability (strategy track records, engine/consensus.js; default: the tables the tab received;
+  //       replays pass null — no hindsight)
   function deepAnalyze(X, opts = {}) {
     const result = deepCore(X, opts);
     if (opts.meta) OTC.Lifecycle?.apply(X, result, opts);
     return result;
   }
 
-  function deepCore(X, { dq = null, scan = null, timing = null } = {}) {
+  // Analysis → decision. Every strategy gives its signal; the Consensus Engine groups them by family and
+  // weighs them by their own record here; the direction is the consensus. A setup needs the consensus to
+  // AGREE (enough families, none against), no hard contradiction, readable data and market. No confidence
+  // threshold: whether an agreement is worth a trade is decided later from measured outcomes (calibration).
+  function deepCore(X, { dq = null, scan = null, timing = null, meta = null, ...opts } = {}) {
     const cfg = X.cfg, skip = [], flags = [];
     const result = { decision: 'SKIP', lean: null, confidence: 0, regime: X.regime, skipReasons: skip, riskFlags: flags,
-      fired: [], active: [], confluence: null, contradiction: null, evidenceFor: [], evidenceAgainst: [], setup: null, combo: null };
+      fired: [], active: [], confluence: null, contradiction: null, consensus: null, evidenceFor: [], evidenceAgainst: [], setup: null, combo: null };
 
-    if (dq) for (const i of dq.issues) (i.severity === 'fatal' ? skip : flags).push(`${i.tf ? OTC.TF_LABEL[i.tf] + ' ' : ''}${i.detail}`);
+    // a strategy mode reads only its own frame: holes in the context frames are noted, not blocking
+    if (dq) for (const i of dq.issues) (i.severity === 'fatal' && cfg.soloMode !== 'youtube' && !(cfg.solo && i.tf && i.tf !== TF.PRIMARY) ? skip : flags).push(`${i.tf ? OTC.TF_LABEL[i.tf] + ' ' : ''}${i.detail}`);
     if (!X.f5?.ready) { skip.push('5M features unavailable'); return result; }
 
     const rg = X.regime.regime;
-    const allowed = cfg.regimeFamilies[rg] || [];
-    const fired = OTC.Strategies.runAll(X, { allowedFamilies: allowed });
+    const fired = OTC.Strategies.runAll(X);
     result.fired = fired;
     if (fired.errors?.length) flags.push(...fired.errors.map((e) => `strategy error ${e}`));
-    if (!allowed.length) skip.push(`regime ${rg}: no strategies allowed`);
-
-    const active = fired.filter((x) => x.active && x.confidence >= cfg.minStrategyScore);
+    const tables = 'reliability' in opts ? opts.reliability : OTC.Consensus.tables;
+    const cons = OTC.Consensus.evaluate(fired, { asset: meta?.asset ?? null, frame: TF.PRIMARY, regime: rg }, { tables, cfg });
+    result.consensus = cons;
+    const active = fired.filter((x) => x.active && !cons.muted.includes(x.strategy));
     result.active = active;
-    const byDir = { CALL: active.filter((x) => x.direction === 'CALL'), PUT: active.filter((x) => x.direction === 'PUT') };
-    const top = (d) => byDir[d][0]?.confidence ?? 0;
-    // Lean = the side with the strongest evidence even if we end up skipping (kept for research).
-    let dir = null;
-    if (byDir.CALL.length || byDir.PUT.length) dir = top('CALL') > top('PUT') || (top('CALL') === top('PUT') && byDir.CALL.length >= byDir.PUT.length) ? 'CALL' : 'PUT';
-    else {
-      const any = fired.filter((x) => x.valid)[0];
-      if (any) dir = any.direction;
+
+    // a mode's own strategies (one, or a set): their signals decide, exactly as they were tested — each on its own
+    // frame and with its own duration; if they point both ways, nothing
+    if (cfg.solo) {
+      // a set's switched-off strategies are left out; one strategy chosen alone (Keltner mode) always runs
+      const set = Array.isArray(cfg.solo) ? cfg.solo.filter((id) => !(cfg.soloOff || []).includes(id)) : [cfg.solo], meta = (id) => OTC.Strategies.get(id) || {};
+      const mine = fired.filter((x) => set.includes(x.strategy) && x.active && (meta(x.strategy).frame == null || set.length === 1 || meta(x.strategy).frame === TF.PRIMARY));
+      if (!mine.length) { skip.push(set.length === 1 ? `no ${set[0]} signal` : 'no mode strategy signal'); return result; }
+      if (new Set(mine.map((x) => x.direction)).size > 1) { skip.push(`mode strategies disagree (${mine.map((x) => x.strategy).join(', ')})`); return result; }
+      const k = mine[0];
+      const conf = OTC.Confluence.evaluate(X, cfg), contra = OTC.Contradiction.evaluate(X, k.direction, conf, fired, cfg, cons);
+      Object.assign(result, { lean: k.direction, confluence: conf, contradiction: contra, setup: k.strategy, setupName: k.name, combo: mine.map((x) => x.strategy).sort().join('+'), solo: true,
+        // its own duration, or the one «حسّن» confirmed on its record
+        soloExpiry: cfg.soloExpiryOf?.[k.strategy] ?? (set.length > 1 ? meta(k.strategy).expirySec ?? null : null),
+        confidence: Math.max(k.confidence, cfg.opportunity?.enterNowConfidence ?? 80), components: { strategy: k.confidence },
+        evidenceFor: mine.map((x) => `${x.name}: ${x.conditions_met.join(', ')}`), evidenceAgainst: contra.against.map((x) => `${x.label}${x.hard ? ' [HARD]' : ''} (not used in this mode)`),
+        risk: 'LOW' });
+      if (!skip.length) result.decision = k.direction;
+      return result;
     }
+
+    // Lean = the consensus direction, else the strongest evidence (kept for research even when skipping).
+    let dir = cons.dir;
+    if (!dir) dir = fired.find((x) => x.valid)?.direction || null;
     const conf = OTC.Confluence.evaluate(X, cfg);
     result.confluence = conf;
     if (!dir && conf.direction !== 'NEUTRAL') dir = conf.direction;
     result.lean = dir;
     if (!dir) { skip.push('no setup and no directional evidence'); return result; }
 
-    if (!active.length) skip.push(allowed.length ? 'no active setup for this regime' : 'no tradable setup');
-    if (byDir.CALL.length && byDir.PUT.length && Math.abs(top('CALL') - top('PUT')) < 15) skip.push('active strategies disagree on direction');
+    const ff = cons.dir ? cons.families[cons.dir].length : 0, fa = cons.dir ? cons.families[U.opp(cons.dir)].length : 0;
+    if (cons.status === 'NONE') skip.push('no strategy signal');
+    else if (cons.status === 'SPLIT') skip.push(`strategy families disagree (${ff} for, ${fa} against)`);
+    else if (cons.status === 'WEAK') skip.push(`only ${ff} strategy famil${ff === 1 ? 'y agrees' : 'ies agree'} (${cons.minFamilies} needed)`);
+    if (rg === 'UNCLEAR' || rg === 'HIGH_VOLATILITY') skip.push(rg === 'UNCLEAR' ? 'market unclear' : 'market too volatile');
 
-    const contra = OTC.Contradiction.evaluate(X, dir, conf, fired, cfg);
+    const contra = OTC.Contradiction.evaluate(X, dir, conf, fired, cfg, cons);
     result.contradiction = contra;
-    const mine = byDir[dir];
+    // the setup = the strongest agreeing strategy, by its weight here × its own score
+    const weight = (id) => cons.signals.find((s) => s.id === id)?.w ?? 1;
+    const mine = active.filter((x) => x.direction === dir).sort((a, b) => weight(b.strategy) * b.confidence - weight(a.strategy) * a.confidence);
     const best = mine[0] || fired.find((x) => x.direction === dir) || null;
     result.setup = best ? best.strategy : null;
     result.setupName = best ? best.name : null;
     result.combo = mine.length ? mine.map((x) => x.strategy).sort().join('+') : null;
 
+    // raw score (research and ranking only — it gates nothing)
     const b = cfg.blend;
     const confidence = Math.round(U.clamp(b.strategy * (best?.confidence ?? 0) + b.confluence * conf.scores[dir] + b.htf * htfScore(X, dir) - contra.penalty));
     result.confidence = confidence;
@@ -136,6 +173,7 @@
     // Evidence lists for the explanation
     const fmt = (x) => x.replace(/_/g, ' ');
     result.evidenceFor = [
+      ...(cons.dir === dir && ff ? [`${cons.agree.length} strategies in ${ff} families agree (${cons.families[dir].join(', ')})`] : []),
       ...mine.slice(0, 4).map((x) => `${x.name} (${x.confidence})`),
       ...Object.entries(conf.modules).filter(([, m]) => m.dir === dir).map(([k, m]) => `${fmt(k)}: ${m.reason}`),
       ...(htfScore(X, dir) >= 75 ? ['higher timeframes aligned'] : []),
@@ -143,7 +181,6 @@
     result.evidenceAgainst = contra.against.map((x) => `${x.label}${x.hard ? ' [HARD]' : ''}`);
 
     if (contra.hard.length) skip.push(...contra.hard);
-    if (confidence < cfg.minDeepConfidence) skip.push(`confidence ${confidence} < ${cfg.minDeepConfidence}`);
     if (scan && scan.score < cfg.deepThreshold) skip.push(`scanner ${scan.score} < ${cfg.deepThreshold} (research record)`);
     if (timing && !timing.ok) skip.push(...timing.flags);
 
@@ -174,6 +211,7 @@
       regime: X.regime.regime, regimeConf: X.regime.confidence,
       setup: a.setup, combo: a.combo,
       strategies: a.fired.map((x) => [x.strategy, x.direction, x.confidence, x.active ? 1 : 0]),
+      cons: OTC.Consensus.summary(a.consensus) || undefined,
       modules: mods,
       ind: f.ready ? {
         rsi: num(f.momentum.rsi, 1), macdHist: num(f.momentum.macd.hist, 7), adx: num(f.trend.adx, 1), pctB: num(f.bb.pctB, 2),

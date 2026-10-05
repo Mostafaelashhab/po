@@ -256,6 +256,36 @@
   cat('eng.lean', 'engine lean', 'engine', 5, (C) => (C.analysis ? C.analysis.lean || 'none' : null), ['CALL', 'PUT', 'none'], { mirror: sideMirror('eng.lean'), post: true });
   num('eng.deep', 'engine deep score', 'engine', 5, (C) => fin(C.analysis?.confidence), [30, 40, 50, 60, 70, 80], { mirror: SAME, post: true });
   cat('pair', 'pair', 'pair', 0, (C) => C.asset ?? null, null, { mirror: { id: 'pair', map: {} }, maxValues: 60 });
+  // ── market state (engine/research.js MarketState of the setup frame) ──────
+  // Normalized only — σ units of the pair's own volatility, ratios, counts — so a rule never depends on a price
+  // level. The same state is built on historical data (research dataset) and live (pipeline context X.state).
+  const ST = (k) => (C) => { const v = C.state?.f?.[k]; return v === undefined ? null : v; };
+  const swap = (id) => ({ id, fn: 'same' });
+  num('st.z1', 'last move (σ)', 'state', 0, ST('z1'), [-2, -1, -0.5, 0.5, 1, 2], { mirror: NEG });
+  num('st.z2', 'move before it (σ)', 'state', 0, ST('z2'), [-2, -1, -0.5, 0.5, 1, 2], { mirror: NEG });
+  num('st.mom3', 'move over 3 candles (σ)', 'state', 0, ST('mom3'), [-3, -1.5, 0, 1.5, 3], { mirror: NEG });
+  num('st.mom12', 'move over 12 candles (σ)', 'state', 0, ST('mom12'), [-6, -3, 0, 3, 6], { mirror: NEG });
+  num('st.accel', 'acceleration of the last move', 'state', 0, ST('accel'), [-1, -0.3, 0.3, 1], { mirror: SAME });
+  bool('st.decel', 'steps shrinking', 'state', 0, ST('decel'), { mirror: SAME });
+  num('st.run', 'run (signed)', 'state', 0, ST('run'), [-4, -3, -2, -1, 1, 2, 3, 4], { mirror: NEG });
+  num('st.pos', 'position in recent range', 'state', 0, ST('pos'), [0.1, 0.25, 0.5, 0.75, 0.9], { mirror: INV1 });
+  num('st.distHi', 'distance to range high (σ)', 'state', 0, ST('distHi'), [0.5, 1, 2, 4], { mirror: swap('st.distLo') });
+  num('st.distLo', 'distance to range low (σ)', 'state', 0, ST('distLo'), [0.5, 1, 2, 4], { mirror: swap('st.distHi') });
+  num('st.sinceHi', 'candles since range high', 'state', 0, ST('sinceHi'), [1, 3, 10, 30], { mirror: swap('st.sinceLo') });
+  num('st.sinceLo', 'candles since range low', 'state', 0, ST('sinceLo'), [1, 3, 10, 30], { mirror: swap('st.sinceHi') });
+  bool('st.brkHi', 'closed above the range high', 'state', 0, ST('brkHi'), { mirror: { id: 'st.brkLo' } });
+  bool('st.brkLo', 'closed below the range low', 'state', 0, ST('brkLo'), { mirror: { id: 'st.brkHi' } });
+  bool('st.failHi', 'failed break above the range', 'state', 0, ST('failHi'), { mirror: { id: 'st.failLo' } });
+  bool('st.failLo', 'failed break below the range', 'state', 0, ST('failLo'), { mirror: { id: 'st.failHi' } });
+  num('st.volr', 'volatility now vs before', 'state', 0, ST('volr'), [0.6, 0.8, 1.2, 1.5], { mirror: SAME });
+  num('st.volChange', 'volatility change (last 6 vs 6 before)', 'state', 0, ST('volChange'), [0.6, 0.8, 1.25, 1.6], { mirror: SAME });
+  num('st.range1', 'last candle range (σ)', 'state', 0, ST('range1'), [0.5, 1, 2, 3], { mirror: SAME });
+  num('st.body', 'last candle body / range', 'state', 0, ST('body'), [-0.6, -0.2, 0.2, 0.6], { mirror: NEG });
+  num('st.upWick', 'upper wick share', 'state', 0, ST('upWick'), [0.3, 0.5, 0.7], { mirror: swap('st.loWick') });
+  num('st.loWick', 'lower wick share', 'state', 0, ST('loWick'), [0.3, 0.5, 0.7], { mirror: swap('st.upWick') });
+  const SEQ3 = ['U', 'D', 'N'].flatMap((a) => ['U', 'D', 'N'].flatMap((b) => ['U', 'D', 'N'].map((c) => a + b + c)));
+  cat('st.seq3', 'last 3 directions', 'state', 0, ST('seq3'), SEQ3, { mirror: { id: 'st.seq3', map: Object.fromEntries(SEQ3.map((x) => [x, x.replace(/[UD]/g, (ch) => (ch === 'U' ? 'D' : 'U'))])) }, maxValues: 27 });
+  cat('st.hour4', 'time of day (4-hour block, UTC)', 'state', 0, ST('hour4'), [0, 1, 2, 3, 4, 5], { mirror: { id: 'st.hour4', map: {} } });
 
   // Existing library strategies as features (for the combination and variation engines).
   // Added lazily so the library is loaded first; `post` = needs the engine's analysis.
@@ -276,7 +306,13 @@
   // ── vectors ────────────────────────────────────────────────────────────────
   // C: { f5, f15, f60, f1, X, scan, analysis, time (decision time), candleTime, asset }
   function context(X, extras = {}) {
-    return { f5: X.f5, f15: X.f15, f60: X.f60, f1: X.f1, X, ...extras };
+    return { f5: X.f5, f15: X.f15, f60: X.f60, f1: X.f1, X, state: X.state || null, ...extras };
+  }
+  // only some features (a dataset that has no analysis context — e.g. market states — computes just these)
+  function vectorOf(C, features) {
+    const out = {};
+    for (const f of features) { let v = null; try { v = f.get(C); } catch (_) { v = null; } out[f.id] = v === undefined ? null : v; }
+    return out;
   }
   function vector(C) {
     ensureStrategyFeatures();
@@ -397,6 +433,6 @@
     return `${rule.dir} · ${parts.join(' + ')}${rule.all.length > 4 ? ' + …' : ''}${rule.none?.length ? ` · avoid ${rule.none.map(label).join(', ')}` : ''}`;
   }
 
-  OTC.FeatureLib = { FEATURES, BY_ID, get: (id) => BY_ID.get(id), ensureStrategyFeatures, context, vector, test: testN, atomKey, label, normalize, ruleKey,
+  OTC.FeatureLib = { FEATURES, BY_ID, get: (id) => BY_ID.get(id), ensureStrategyFeatures, context, vector, vectorOf, test: testN, atomKey, label, normalize, ruleKey,
     matches, mirrorAtom, mirrorRule, complexity, name, tfOfAtom, groupOf, cls, ZONES };
 })(typeof globalThis !== 'undefined' ? globalThis : this);

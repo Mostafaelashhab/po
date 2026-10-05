@@ -26,10 +26,10 @@
   //   available   expiries the platform offers (s), already ⊂ cfg.expiryChoices
   //   history     (seconds) → { n, lo, be } | null, outcomes of similar past setups at that horizon
   //   fixedSec    a discovered strategy's own validated expiry (wins over everything)
-  function choose({ tf = 300, kind = 'trend', f = null, levelAtr = Infinity, available = null, history = null, fixedSec = null, cfg = OTC.DEFAULT_CONFIG } = {}) {
+  function choose({ tf = 300, kind = 'trend', f = null, levelAtr = Infinity, available = null, history = null, fixedSec = null, fixedSource = null, cfg = OTC.DEFAULT_CONFIG } = {}) {
     const choices = (available?.length ? available : cfg.expiryChoices).filter((s) => cfg.expiryChoices.includes(s) && (tf < 60 || s >= 60));
     const pool = choices.length ? choices : cfg.expiryChoices;
-    if (fixedSec) return { sec: snap(fixedSec, pool), source: 'discovered', reason: { code: 'discovered', sec: fixedSec }, candidates: [] };
+    if (fixedSec) return { sec: snap(fixedSec, pool), source: fixedSource || 'discovered', reason: { code: fixedSource || 'discovered', sec: fixedSec }, candidates: [] };
 
     // 1. evidence from similar past setups
     const minN = Math.max(30, Math.round((cfg.validation?.minTrain ?? 50) * 0.6));

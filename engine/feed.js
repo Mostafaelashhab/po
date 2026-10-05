@@ -3,7 +3,7 @@
 // the tab script feeds it ticks and history rows.
 (function (G) {
   const OTC = G.OTC, U = OTC.U, TF = OTC.TF;
-  const KEEP = { 5: 720, 10: 400, 15: 300, 30: 240, 60: 400, 300: 400, 900: 300, 1800: 200, 3600: 200 };
+  const KEEP = { 5: 720, 10: 400, 15: 300, 30: 240, 60: 400, 300: 400, 600: 300, 900: 300, 1800: 200, 3600: 200 };
   const MAX_FILL = 12; // seconds frames: up to this many tick-less candles are filled flat (longer gaps stay gaps)
 
   class Series {
@@ -64,6 +64,12 @@
 
     // A missing candle among the last n closed ones (e.g. PO's history ended a minute or two before
     // live candles began). Analysis treats recent gaps as fatal, so the caller refills them from history.
+    // The most recent hole among the last n candles: { from, to } = first missing candle time, first candle after.
+    gapIn(n = 30) {
+      const c = this.closed(n + 1);
+      for (let i = c.length - 1; i > 0; i--) if (c[i].time - c[i - 1].time > this.tf) return { from: c[i - 1].time + this.tf, to: c[i].time };
+      return null;
+    }
     recentGap(n = 30) {
       const c = this.closed(n + 1);
       for (let i = 1; i < c.length; i++) if (c[i].time - c[i - 1].time > this.tf) return true;

@@ -33,6 +33,14 @@ test('expiry: only durations the platform offers', () => {
   assert.ok(cfg.expiryChoices.includes(d.sec));
 });
 
+test('expiry: PO\'s S3 for 5s-frame setups; longer frames keep their own length', () => {
+  const PO = [3, 15, 30, 60, 180, 300, 1800];
+  assert.equal(OTC.Expiry.choose({ tf: 5, kind: 'momentum', available: PO, cfg }).sec, 3, '5s setup → closest offered: 3s');
+  assert.equal(OTC.Expiry.choose({ tf: 10, kind: 'momentum', available: PO, f: { volatility: { state: 'HIGH' } }, cfg }).sec, 15, 'a 10s setup never drops to 3s');
+  assert.equal(OTC.Expiry.choose({ tf: 60, kind: 'momentum', available: PO, cfg }).sec, 60);
+  assert.equal(OTC.Expiry.choose({ tf: 5, kind: 'momentum', available: [3], cfg }).sec, 3, 'maximum 3s');
+});
+
 test('expiry: history wins only with enough outcomes, several horizons and a positive lower bound', () => {
   const good = (sec) => ({ n: 80, wr: sec === 180 ? 66 : 52, lo: sec === 180 ? 58 : 44, be: 54 }); // history by seconds
   const h = OTC.Expiry.choose({ tf: 60, kind: 'momentum', history: good, cfg });
@@ -263,11 +271,23 @@ test('wording: an entry the system will not place is never shown as "enter now"'
   const d0 = AR.decision({ opp: base }, now);
   assert.equal(d0.title, 'ادخل الآن');
   const shadow = AR.decision({ opp: { ...base, action: { action: 'shadow' } } }, now);
-  assert.equal(shadow.title, 'الزوج غير مفتوح للتنفيذ');
+  assert.equal(shadow.title, 'الزوج غير مفتوح على شارت تبويب مفعّل');
+  const idle = AR.decision({ opp: { ...base, action: { action: 'notarmed' } } }, now);
+  assert.equal(idle.title, 'التبويب غير مفعّل للتنفيذ');
+  assert.equal(idle.tone, 'warn');
   assert.notEqual(shadow.key, 'enter');
   const risk = AR.decision({ opp: { ...base, action: { action: 'risk', detail: ['COOLDOWN', 'MAX_CONCURRENT'] } } }, now);
   assert.equal(risk.title, 'منعتها الحماية');
   assert.match(risk.rows[0][1], /استراحة بعد صفقة خاسرة، توجد صفقة مفتوحة بالفعل/);
   const done = AR.decision({ opp: { ...base, action: { action: 'confirmed' } } }, now);
   assert.equal(done.title, 'تم التنفيذ');
+});
+
+test('calibration: a copy signal is never judged by the engine\'s population', () => {
+  const T = OTC.Calibration.buildTables(cohort(400, 0.3, { seed: 8 }), cfg); // the engine's 5M pullbacks lose
+  const copyCand = { frame: 300, setup: 'copy_signal', kind: 'copy', dir: 'CALL', regime: 'TRENDING_UP', asset: 'EURUSD_otc', payout: 92 };
+  const open = OTC.Calibration.assess(copyCand, T, { cfg });
+  assert.equal(open.level, 'frame', 'without restriction the broad population would be used');
+  const only = OTC.Calibration.assess(copyCand, T, { cfg, sources: ['entries'], levels: ['pair', 'pair_setup', 'setup_regime', 'setup', 'kind_regime', 'kind'] });
+  assert.equal(only.status, 'INSUFFICIENT_DATA');
 });

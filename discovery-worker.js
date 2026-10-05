@@ -2,7 +2,7 @@
 // cycle of tens of seconds never freezes the page. Reads candles and earlier
 // strategies from IndexedDB and writes the new versioned rows and the run report back.
 importScripts('indicators.js', 'engine/core.js', 'engine/dataquality.js', 'engine/features.js', 'engine/regime.js',
-  'engine/factory.js', 'engine/library.js', 'engine/confluence.js', 'engine/contradiction.js', 'engine/risk.js',
+  'engine/factory.js', 'engine/library.js', 'engine/consensus.js', 'engine/confluence.js', 'engine/contradiction.js', 'engine/risk.js',
   'engine/pipeline.js', 'engine/stats.js', 'engine/featurelib.js', 'engine/discovery.js', 'engine/discovery-search.js',
   'engine/discovery-assess.js', 'engine/lifecycle.js', 'db.js');
 

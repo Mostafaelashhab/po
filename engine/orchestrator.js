@@ -58,7 +58,10 @@
       const v = closes.get(rec.ts + N * tf);
       if (v != null) { rec.exits[N] = v; changed = true; }
     }
-    if (horizons.every((N) => rec.exits[N] != null)) { rec.status = 'resolved'; changed = true; }
+    // Horizons under 5s are resolved only by 1-second closes, sent while the pair stays on a chart; no history
+    // brings them back. Once a later horizon has resolved and two minutes have passed, they never will.
+    const lost = (N) => N < 5 && rec.exits[N] == null && nowSec - rec.ts > 120 && horizons.some((M) => M >= 5 && rec.exits[M] != null);
+    if (horizons.every((N) => rec.exits[N] != null || lost(N))) { rec.status = 'resolved'; changed = true; }
     else if (nowSec - rec.ts > 24 * 3600) { rec.status = 'unresolved'; changed = true; } // the candles never arrived
     return changed;
   }

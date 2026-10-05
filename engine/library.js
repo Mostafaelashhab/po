@@ -35,6 +35,19 @@
   def({ id: 'ema_pullback', name: 'EMA Pullback', family: 'trend', regimes: TREND,
     conditions: (s, X) => [R('EMA order with', H.orderWith(X.f5, s)), R('touched EMA21 and held', H.pulledBackTo(X.f5, s, 'e21', 0.3, 3)),
       R('candle with', H.candleWith(X.f5, s)), O('EMA21 slope', X.f5.trend.slope21 * s.sg > 0.05), O('pattern', H.anyPattern(X.f5, s))] });
+  // Keltner trend pullback (2026-10-04): price held 5 candles in one half of the Keltner channel (EMA 20 ± 2 ATR 10),
+  // then a candle touched the middle line and closed back on the trend side → with the trend. The one rule from 30+
+  // YouTube strategies that stayed above break-even on 10M / shifted-10M / 15M views of the user's data (30-minute
+  // trades: 57.6% of 177, 56.5%, 56.2%) — not proven: one of ~60 rules tested on the same 3 days. Measured live like
+  // every other strategy; it trades only if its own record proves it.
+  def({ id: 'keltner_trend_pullback', name: 'Keltner Trend Pullback', family: 'trend', regimes: ANY, against: () => [], frame: 600, expirySec: 1800,
+    conditions: (s, X) => {
+      const k = X.f5?.keltner, c = H.recent(X.f5, 6);
+      if (!k || c.length < 6) return [R('Keltner channel ready', false)];
+      const half = [0, 1, 2, 3, 4].every((j) => (s.up ? c[j].close > k.mid[j] && c[j].close <= k.up[j] : c[j].close < k.mid[j] && c[j].close >= k.lo[j]));
+      const x = c[5], touch = s.up ? x.low <= k.mid[5] && x.close > k.mid[5] : x.high >= k.mid[5] && x.close < k.mid[5];
+      return [R('5 candles in the trend half of the Keltner channel', half), R('touched the middle line and closed back', touch)];
+    } });
   def({ id: 'ma_alignment', name: 'Moving Average Alignment', family: 'trend', regimes: TREND,
     conditions: (s, X) => [R('EMA 9/21/50 ordered', H.orderWith(X.f5, s)), R('price beyond EMA9', X.f5.trend.dist.e9 * s.sg > 0),
       O('price on EMA200 side', X.f5.trend.dist.e200 == null || X.f5.trend.dist.e200 * s.sg > 0), O('EMA50 slope', X.f5.trend.slope50 * s.sg > 0.02),

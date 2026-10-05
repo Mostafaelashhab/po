@@ -23,6 +23,7 @@
 
   // Why the engine skipped, as codes.
   const SKIP_CODES = [
+    [/no keltner_trend_pullback signal/, 'no_keltner'], [/no mode strategy signal/, 'no_youtube'],
     [/learned filter/, 'filter'], [/^risk:/, 'risk'], [/higher-timeframe conflict/, 'htf_conflict'],
     [/missing|stale|candles|frozen|timeframe|duplicat|malformed|far from chart|no price tick|unavailable|data missing|future/, 'data'],
     [/^regime /, 'regime'], [/window missed|chasing|opposite move|not closed yet|timing changed/, 'timing'],

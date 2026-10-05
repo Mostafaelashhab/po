@@ -5,7 +5,7 @@
   const OTC = G.OTC, U = OTC.U, H = OTC.Strategies.H;
   const PENALTY = { low: 4, medium: 8, high: 15 };
 
-  function evaluate(X, dir, confluence, fired, cfg = OTC.DEFAULT_CONFIG) {
+  function evaluate(X, dir, confluence, fired, cfg = OTC.DEFAULT_CONFIG, consensus = null) {
     const s = U.side(dir), f = X.f5, out = [];
     const add = (label, severity, hard = false, code = null) => out.push({ label, severity, hard, code });
     const tfName = (tf) => OTC.TF_LABEL[tf] || `${tf}s`;
@@ -43,10 +43,16 @@
     if (f.volatility.abnormal) add(`abnormal candle ${f.volatility.lastRange.toFixed(1)}× ATR`, 'high', true, 'abnormal');
     else if (f.volatility.state === 'HIGH') add('volatility in top 10%', 'medium', false, 'volatility');
 
-    // Other strategies and modules
+    // Other strategies and modules. With the consensus: opposition counts by family (correlated strategies
+    // are one reading) — a whole family pointing the other way is hard, single strategies are not.
     const opp = (fired || []).filter((x) => x.active && x.direction === s.opp);
     const mine = (fired || []).filter((x) => x.active && x.direction === dir);
-    if (opp.length) {
+    if (consensus) {
+      const famAgainst = consensus.families[s.opp] || [];
+      // hard only when the strategies AGREE on the other side (enough families, none for this one)
+      if (famAgainst.length) add(`strategy famil${famAgainst.length > 1 ? 'ies' : 'y'} against (${famAgainst.join(', ')})`, 'high', consensus.dir === s.opp && consensus.status === 'AGREE', 'conflict');
+      else if (consensus.against?.length || opp.length) add(`${opp.length} strateg${opp.length > 1 ? 'ies' : 'y'} point ${s.opp}`, 'low', false, 'conflict_soft');
+    } else if (opp.length) {
       const bestOpp = opp[0].confidence, bestMine = mine[0]?.confidence ?? 0;
       if (bestOpp >= bestMine - 10) add(`strategies conflict strongly (${opp[0].name} ${s.opp} ${bestOpp})`, 'high', true, 'conflict');
       else add(`${opp.length} active strateg${opp.length > 1 ? 'ies' : 'y'} point ${s.opp}`, 'medium', false, 'conflict_soft');

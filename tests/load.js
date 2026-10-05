@@ -8,11 +8,11 @@ const ROOT = path.join(__dirname, '..');
 const ENGINE_FILES = [
   'indicators.js',
   'engine/core.js', 'engine/dataquality.js', 'engine/features.js', 'engine/regime.js',
-  'engine/factory.js', 'engine/library.js', 'engine/confluence.js', 'engine/contradiction.js',
+  'engine/factory.js', 'engine/library.js', 'engine/youtube.js', 'engine/consensus.js', 'engine/confluence.js', 'engine/contradiction.js',
   'engine/risk.js', 'engine/pipeline.js', 'engine/stats.js', 'engine/replay.js',
   'engine/feed.js', 'engine/orchestrator.js',
   'engine/featurelib.js', 'engine/discovery.js', 'engine/discovery-search.js', 'engine/discovery-assess.js', 'engine/lifecycle.js', 'engine/facts.js',
-  'engine/expiry.js', 'engine/copytrade.js', 'engine/opportunity.js', 'engine/calibration.js', 'engine/frameselect.js', 'ui/ar.js',
+  'engine/expiry.js', 'engine/copytrade.js', 'engine/opportunity.js', 'engine/calibration.js', 'engine/frameselect.js', 'engine/research.js', 'engine/audit.js', 'engine/postmortem.js', 'engine/integrity.js', 'ui/ar.js',
 ];
 
 function load(files = ENGINE_FILES) {

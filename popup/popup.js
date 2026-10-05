@@ -32,7 +32,7 @@ function connect() {
 }
 const send = (m) => S.port?.postMessage(m);
 const now = () => S.snap?.poNow ?? Date.now() / 1000;
-const openAdvanced = (hash = '') => chrome.tabs.create({ url: chrome.runtime.getURL(`dashboard/index.html${hash}`) });
+const openAdvanced = (hash = '') => { if (globalThis.PO_EDITION?.locked) return; chrome.tabs.create({ url: chrome.runtime.getURL(`dashboard/index.html${hash}`) }); };
 
 // ── preferences (local to this browser) ────────────────────────────────────
 async function loadPrefs() {
@@ -80,22 +80,31 @@ function render() {
   $('#sys').className = `sys ${sys.cls}`;
   $('#sys .txt').textContent = sys.text;
   const stopped = !!s?.risk?.emergency;
-  $('#power').innerHTML = `${icon('power')}<span>${stopped ? 'تشغيل النظام' : 'إيقاف النظام'}</span>`;
+  $('#power').innerHTML = `${icon('power')}<span>${stopped ? 'تشغيل' : 'إيقاف الطوارئ'}</span>`;
   $('#power').classList.toggle('stopped', stopped);
   const bar = $('#bar');
   const ex = s?.lastExec && Date.now() - s.lastExec.at < 120000 ? AR.execState(s.lastExec) : null;
   const legacy = (s?.tabsInfo || []).find((t) => t.engine === 'legacy' && t.running);
-  if (ex) { bar.className = `bar ${ex.tone === 'bad' ? 'bad' : ''}`; bar.textContent = `${AR.pair(s.lastExec.asset)} · ${AR.dir(s.lastExec.dir)} — ${ex.text}`; }
+  const stale = (s?.tabsInfo || []).filter((t) => t.stale);
+  if (stale.length) { bar.className = 'bar bad'; bar.textContent = `${stale.length === 1 ? 'تبويب' : `${stale.length} تبويبات`} Pocket Option ${stale.length === 1 ? 'يعمل' : 'تعمل'} بنسخة قديمة من الإضافة (${stale.map((t) => AR.pair(t.chartAsset)).join('، ')}) — اعمل Reload ${stale.length === 1 ? 'له' : 'لها'}.`; }
+  else if (s?.calStatus?.status === 'REJECTED' && s?.cfg?.soloMode !== 'youtube') { // the strategies mode does not use the self-check
+    bar.className = 'bar bad'; bar.textContent = `النظام أوقف التداول: الصفقات اللي سمح بيها على أساس "مثبتة" ما عدّتش نقطة التعادل في آخر ${s.cfg?.gate?.monitorWindowH ?? 48} ساعة. بيعيد التقييم لوحده.`;
+  }
+  else if (['AUTO', 'MANUAL'].includes(s?.cfg?.execMode) && !stopped && (s?.tabsInfo || []).length && !(s.tabsInfo || []).some((t) => t.armed)) {
+    // seen on real data: hours of qualified entries with no tab started — nothing can be placed
+    bar.className = 'bar bad'; bar.textContent = 'ولا تبويب مفعّل للتنفيذ — اضغط «تشغيل» في لوحة Pocket Option، وإلا تُسجَّل الفرص ورقيًا فقط.';
+  }
+  else if (ex) { bar.className = `bar ${ex.tone === 'bad' ? 'bad' : ''}`; bar.textContent = `${AR.pair(s.lastExec.asset)} · ${AR.dir(s.lastExec.dir)} — ${ex.text}`; }
   else if (legacy) { bar.className = 'bar'; bar.textContent = `تبويب ${AR.pair(legacy.chartAsset)} يتداول بالبوت القديم (شموع 15 ثانية)، وقراراته لا تظهر هنا.`; }
   else if (s?.cfg?.execMode === 'AUTO' && !stopped) { bar.className = 'bar'; bar.textContent = 'التنفيذ التلقائي مفعّل'; }
   else bar.className = 'bar hidden';
   document.querySelectorAll('#tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === S.tab));
-  const views = { home: viewHome, pairs: viewPairs, history: viewHistory, research: viewResearch, settings: viewSettings };
+  const views = { home: globalThis.viewChat || viewHome, pairs: viewPairs, history: viewHistory, research: viewResearch, settings: viewSettings };
   Promise.resolve(views[S.tab]()).then((html) => { if (html != null) { $('#view').innerHTML = html; bind(); } });
   if (S.sheet) renderSheet();
 }
 
-function viewHome() {
+async function viewHome() {
   const s = S.snap;
   if (!s) return `<div class="card calm">${icon('pulse')}<h2>جاري الاتصال بالنظام</h2></div>`;
   if (s.risk?.emergency) {
@@ -118,7 +127,7 @@ function viewHome() {
   const opp = manual.length ? list.find((x) => x.p.asset === manual[0].asset)
     : ['enter', 'wait', 'entered'].map((k) => list.find((x) => x.st.key === k)).find(Boolean); // only what passed the gate
   if (opp) {
-    const { p } = opp, d = AR.decision(p, now(), s.cfg), w = AR.why(d.facts);
+    const { p } = opp, d = AR.decision(p, now(), s.cfg);
     const pend = manual.find((m) => m.asset === p.asset);
     const key = `${p.asset}|${p.opp?.id || p.watch?.closesAt}|${d.key}`;
     const fresh = S.seenOpp !== key;
@@ -128,23 +137,28 @@ function viewHome() {
       <div class="card ${fresh ? 'enter' : ''}">
         <div class="opp-head"><span class="pair">${e(AR.pair(p.asset))}</span>${d.dir ? `<span class="dir ${d.dir}">${AR.dir(d.dir)}</span>` : ''}</div>
         <div class="state"><span><b>${e(d.title)}</b></span>${d.timer && d.timer.sec > 0 ? `<span>${e(d.timer.label)} ${AR.clock(d.timer.sec)}</span>` : ''}</div>
-        ${decisionRows(d)}
-        <ul class="why">${w.good.slice(0, 3).map((x) => `<li class="g">${icon('check')}<span>${e(x)}</span></li>`).join('')}${w.bad.slice(0, 3).map((x) => `<li class="b">${icon('alert')}<span>${e(x)}</span></li>`).join('')}</ul>
+        ${decisionRows({ rows: d.rows.slice(0, 4) })}
         <div class="actions">
-          ${pend ? `<button class="btn go" data-act="confirm" data-id="${e(pend.id)}">تنفيذ</button><button class="btn" data-act="reject" data-id="${e(pend.id)}">تجاهل</button>` : ''}
+          ${pend ? `<button class="btn go" data-act="confirm" data-id="${e(pend.id)}">ادخل</button><button class="btn" data-act="reject" data-id="${e(pend.id)}">تجاهل</button>` : ''}
           <button class="btn ${pend ? '' : 'primary'}" data-pair="${e(p.asset)}" data-tab-id="${p.tabId}">عرض التحليل</button>
         </div>
         ${!pend && d.key === 'enter' ? `<div class="dim" style="margin-top:8px">${e(modeLine(s.cfg.execMode))}</div>` : ''}
       </div>`;
   } else {
     // NO QUALIFIED OPPORTUNITY: what was scanned, the nearest candidate and why it isn't enough.
-    const minPay = s.cfg.gate?.minPayout ?? 92, scanned = s.pairs.filter((p) => p.scanned).length;
+    const minPay = s.cfg.gate?.minPayout ?? 80, scanned = s.pairs.filter((p) => p.scanned).length;
     const near = list.filter((x) => x.st.key === 'below').sort((a, b) => (b.p.opp?.cal?.p ?? 0) - (a.p.opp?.cal?.p ?? 0))[0];
     const nd = near ? AR.decision(near.p, now(), s.cfg) : null;
-    html += `<div class="card calm">${icon('pulse')}<h2>لا توجد فرصة مؤهلة الآن</h2>
-      <p>تم فحص ${e(AR.count(list.length, 'زوج واحد', 'زوجين', 'أزواج', 'زوجًا'))}${scanned ? ` (${scanned} منها من التاريخ دون شارت)` : ''}. لا يدخل النظام إلا على زوج نسبة ربحه ${minPay}% أو أكثر، وبعد أن تجتاز الفرصة كل الفحوص.</p>
-      ${near ? `<p class="note" style="margin-top:8px">الأقرب: <span class="pair" style="font-size:1em">${e(AR.pair(near.p.asset))}</span> · ${e(AR.dir(near.p.opp?.dir))}<br><span class="dim">${e(nd.rows.find((r) => r[0] === 'السبب')?.[1] || '')}</span></p>` : ''}
-      <div class="dim">نموذج الثقة: ${e(AR.MODEL[s.calStatus?.status] || AR.MODEL.COLLECTING)} · آخر تحديث ${e(AR.ago(lastUpdateAgo()))}</div></div>`;
+    html += `<div class="card calm">${icon('pulse')}<h2>لا توجد صفقة</h2>
+      <p>جاري فحص أزواج OTC… (${e(AR.count(list.length, 'زوج واحد', 'زوجين', 'أزواج', 'زوجًا'))}${scanned ? `، ${scanned} منها من التاريخ دون شارت` : ''}، نسبة ربح ${minPay}% أو أكثر)</p>
+      ${near ? `<p class="note" style="margin-top:8px">الأقرب: <span class="pair" style="font-size:1em">${e(AR.pair(near.p.asset))}</span> · ${e(AR.dir(near.p.opp?.dir))}<br><span class="dim">${e(nd.rows.find((r) => r[0] === 'السبب' || r[0] === 'لماذا رُفضت')?.[1] || '')}</span></p>` : ''}</div>`;
+  }
+  // the last trade the system took, and how it ended
+  const last = (await loadRecords()).find((r) => ['auto', 'manual'].includes(r.exec?.action) && !['expired', 'failed'].includes(r.exec?.status));
+  if (last) {
+    const { dir, R } = resultOf(last), res = R ? AR.RESULT[R] : null;
+    html += `<div class="label space">آخر صفقة</div><button class="row" data-rec="${e(last.id)}"><div class="main"><div><span class="pair" style="font-size:1em">${e(AR.pair(last.asset))}</span> · <span class="word ${dir}">${AR.dir(dir)}</span></div>
+      <div class="sub">${e(AR.ago(now() - last.ts))}</div></div><span class="status ${res ? (res.tone === 'go' ? 'go' : res.tone === 'bad' ? 'bad' : '') : ''}"><span class="dot"></span>${res ? res.text : 'بانتظار النتيجة'}</span></button>`;
   }
   html += `<div class="label space">الأزواج المراقبة</div><div class="list">${list.slice(0, 5).map(pairRow).join('')}
     ${list.length > 5 ? `<button class="more" data-go="pairs">عرض كل الأزواج (${list.length})</button>` : ''}</div>`;
@@ -155,9 +169,9 @@ const modeLine = (m) => ({ OBSERVE: 'وضع المراقبة: لن يتم تنف
   MANUAL: 'تأكيد يدوي: سيُطلب تأكيدك قبل التنفيذ.', AUTO: 'التنفيذ التلقائي مفعّل — يدخل في التبويب المفعّل لهذا الزوج.' }[m] || '');
 function lastUpdateAgo() { const ages = (S.snap?.pairs || []).map((p) => p.seenAgo).filter((x) => x != null); return ages.length ? Math.min(...ages) : null; }
 function footer(list) {
-  const err = list.some((x) => x.st.key === 'error');
+  const err = list.filter((x) => x.st.key === 'error'), temp = err.length && err.every((x) => x.st.tone === 'muted');
   return `<div class="foot"><span>المراقبة: ${list.length ? e(AR.count(list.length, 'زوج واحد', 'زوجان', 'أزواج', 'زوجًا')) : 'لا توجد أزواج'}</span>
-    ${err ? '<span class="warn">تعذر قراءة بيانات أحد الأزواج</span>' : `<span>آخر تحديث ${e(AR.ago(lastUpdateAgo()))}</span>`}</div>`;
+    ${err.length ? `<span class="${temp ? '' : 'warn'}">${temp ? 'جاري استكمال بيانات بعض الأزواج' : 'تعذر قراءة بيانات أحد الأزواج'}</span>` : `<span>آخر تحديث ${e(AR.ago(lastUpdateAgo()))}</span>`}</div>`;
 }
 function decisionRows(d) {
   if (!d.rows.length) return '';
@@ -246,7 +260,8 @@ async function viewResearch() {
         <div class="state"><span>أفضل استخدام: <b>${e(AR.bestUse(r))}</b></span></div>
         <p class="note" style="margin-top:4px">${e(st.note)} تم اكتشافه من بيانات التداول السابقة.</p>
         ${r.status === 'WATCHLIST' ? `<div class="actions"><button class="btn primary" data-promote="${e(r.strategy_id)}">اعتماد</button></div>` : ''}
-        ${r.status === 'PROMOTED' ? `<div class="actions"><button class="btn danger" data-suspend="${e(r.strategy_id)}">إيقاف</button></div>` : ''}</div>`;
+        ${r.status === 'PROMOTED' ? `<div class="actions"><button class="btn danger" data-suspend="${e(r.strategy_id)}">إيقاف</button></div>` : ''}
+        ${['SUSPENDED', 'DECAYING'].includes(r.status) ? `<div class="actions"><button class="btn" data-resume="${e(r.strategy_id)}">إعادة الاختبار</button><button class="btn danger" data-retire="${e(r.strategy_id)}">إيقاف نهائي</button></div>` : ''}</div>`;
     }).join('')}`;
   }
   html += `<button class="btn" style="margin-top:14px;width:100%" data-adv="#discovery">${icon('open')} تفاصيل البحث في الوضع المتقدم</button>`;
@@ -254,44 +269,52 @@ async function viewResearch() {
 }
 
 // ── settings ────────────────────────────────────────────────────────────────
+// Only what the user decides: the trading mode, on/off and the emergency stop. Pairs, frames, strategies,
+// entry timing and duration are chosen by the system; the rest sits under "إعدادات متقدمة".
 function viewSettings() {
   const s = S.snap;
   if (!s) return '';
-  const c = s.cfg, P = S.prefs;
+  const c = s.cfg, P = S.prefs, stopped = !!s.risk?.emergency;
   const seg = (k, opts, cur) => `<div class="seg">${opts.map(([v, l]) => `<button class="${cur === v ? 'on' : ''}" data-${k}="${v}">${l}</button>`).join('')}</div>`;
   const stepper = (path, v, min, max, inc = 1) => `<div class="num"><button data-step="${path}" data-d="${-inc}" data-min="${min}" data-max="${max}" aria-label="أقل">−</button><b>${v}</b><button data-step="${path}" data-d="${inc}" data-min="${min}" data-max="${max}" aria-label="أكثر">+</button></div>`;
-  const mode = c.execMode === 'OBSERVE' || c.execMode === 'ALERT' ? 'PAPER' : c.execMode;
+  const mode = c.execMode === 'OBSERVE' ? 'PAPER' : c.execMode;
   const radio = (v, t, sub) => `<button class="radio ${mode === v ? 'on' : ''}" data-mode="${v}"><span class="ring"></span><span><b>${t}</b><small>${sub}</small></span></button>`;
-  return `<div class="label">المراقبة</div><div class="set">
-      <div class="item"><div class="t">الأزواج<small>تتم مراقبة كل زوج OTC مفتوح في تبويبات المنصة</small></div><span>${s.pairs.length ? e(AR.count(s.pairs.length, 'زوج واحد', 'زوجان', 'أزواج', 'زوجًا')) : 'لا يوجد'}</span></div>
-      <div class="item stack"><div class="t">فريمات البحث عن الفرص<small>لا يوجد فريم ثابت: كل فرصة تأخذ فريمها وفريم السياق والتأكيد المناسب لها. فريمات الثواني للأزواج المفتوحة على الشارت فقط.</small></div>
-        <div class="seg wrap">${[[5, '5ث'], [10, '10ث'], [15, '15ث'], [30, '30ث'], [60, 'دقيقة'], [300, '5د'], [900, '15د']].map(([v, l]) => `<button class="${(c.setupFrames || []).includes(v) ? 'on' : ''}" data-frame="${v}">${l}</button>`).join('')}</div></div>
-      <div class="item"><div class="t">أقل نسبة ربح للدخول<small>لا يدخل النظام (ورقيًا أو فعليًا) على زوج نسبة ربحه أقل من ذلك</small></div><span>${c.gate?.minPayout ?? 92}%</span></div>
-      <div class="item"><div class="t">نموذج القرار<small>لا يوجد رقم ثابت للثقة. احتمال الفوز يُقدَّر من نتائج فرص مشابهة سابقة، ولا دخول إلا إذا كان الربح المتوقع موجبًا والنتائج مستقرة. بلا بيانات كافية: تجريبي فقط، لا حساب حقيقي.</small></div><span>${e(AR.MODEL[s.calStatus?.status] || AR.MODEL.COLLECTING)}</span></div>
-      <div class="item"><div class="t">مدة الصفقة<small>تُختار لكل فرصة حسب نوعها وسرعة السوق، ثم حسب ما نجح سابقًا</small></div><span>يحددها النظام</span></div>
-      <div class="item"><div class="t">توقيت الدخول<small>عند إغلاق الشمعة، فورًا أو بعد تأكيد أو عودة السعر</small></div><span>يحدده النظام</span></div></div>
-    <div class="label space">التنبيهات</div><div class="set"><div class="item"><div class="t">تنبيه الفرص</div>
-      ${seg('notify', [['browser', 'تنبيه المتصفح'], ['sound', 'مع صوت'], ['none', 'بدون']], c.ui?.notify || 'browser')}</div></div>
-    <div class="label space">التداول</div><div class="set">
-      ${radio('PAPER', 'مراقبة فقط', 'تُسجَّل الفرص كصفقات ورقية لقياس النتائج، دون تنفيذ.')}
-      ${radio('MANUAL', 'تأكيد يدوي', 'يطلب تأكيدك قبل كل صفقة خلال نافذة الدخول.')}
-      ${radio('AUTO', 'تنفيذ تلقائي', 'ينفّذ دون سؤالك في التبويبات المفعّلة، حسب اختيارك تحت.')}
-      ${mode === 'AUTO' ? `<div class="item"><div class="t">على الحساب التجريبي</div>${seg('autodemo', [['all', 'كل الفرص المؤهلة'], ['promoted', 'المعتمدة فقط']], c.autoDemoAll !== false ? 'all' : 'promoted')}</div>
-      <div class="item"><div class="t">فتح الزوج تلقائيًا<small>عند وجود فرصة مؤهلة على زوج غير مفتوح، يفتحه التبويب المفعّل من قائمة الأزواج في المنصة</small></div>${seg('autoswitch', [['on', 'تشغيل'], ['off', 'إيقاف']], c.autoSwitch !== false ? 'on' : 'off')}</div>
-      <div class="item"><div class="t">على الحساب الحقيقي</div>${seg('autoreal', [['all', 'كل الفرص المؤهلة'], ['promoted', 'المعتمدة فقط']], c.autoRealAll === true ? 'all' : 'promoted')}</div>` : ''}</div>
-    <div class="label space">الحماية</div><div class="set">
-      <div class="item"><div class="t">إيقاف بعد خسائر متتالية</div>${stepper('risk.maxConsecutiveLosses', c.risk.maxConsecutiveLosses, 1, 20)}</div>
-      <div class="item"><div class="t">حد الصفقات اليومي</div>${stepper('risk.maxTradesPerDay', c.risk.maxTradesPerDay, 1, 200)}</div>
-      <div class="item"><div class="t">استراحة بعد الخسارة<small>دقائق بلا صفقات جديدة بعد كل صفقة خاسرة (0 = بلا استراحة)</small></div>${stepper('risk.lossCooldownMin', c.risk.lossCooldownMin, 0, 60)}</div>
-      <div class="item"><div class="t">صفقات مفتوحة في نفس الوقت</div>${stepper('risk.maxConcurrent', c.risk.maxConcurrent, 1, 5)}</div>
-      <div class="item"><div class="t">انتظار قبل تكرار نفس الزوج<small>دقائق بعد آخر صفقة على الزوج (0 = بلا انتظار)</small></div>${stepper('risk.pairCooldownMin', c.risk.pairCooldownMin ?? 10, 0, 60)}</div>
-      <div class="item"><div class="t">عدادات اليوم<small>${s.risk ? `${s.risk.trades ?? 0} صفقة · ${s.risk.consecLosses ?? 0} خسائر متتالية · الصافي ${(s.risk.net ?? 0).toFixed(2)} رهان` : ''}</small></div><button class="btn small" data-act="resetday">تصفير</button></div>
-      <div class="item"><div class="t">إيقاف الطوارئ<small>يوقف كل التنفيذ والاقتراحات فورًا</small></div><button class="switch ${s.risk?.emergency ? 'on' : ''}" data-act="${s.risk?.emergency ? 'resume' : 'stop'}" aria-label="إيقاف الطوارئ"></button></div></div>
-    <div class="label space">المظهر</div><div class="set">
-      <div class="item"><div class="t">الوضع الداكن</div><button class="switch ${P.theme === 'dark' ? 'on' : ''}" data-pref="theme" aria-label="الوضع الداكن"></button></div>
-      <div class="item"><div class="t">حجم الواجهة</div>${seg('size', [['normal', 'عادي'], ['large', 'كبير']], P.size)}</div>
-      <div class="item"><div class="t">الوضع المتقدم<small>يُظهر التفاصيل الفنية في شاشة التحليل</small></div><button class="switch ${P.advanced ? 'on' : ''}" data-pref="advanced" aria-label="الوضع المتقدم"></button></div></div>
-    <button class="btn" style="margin-top:14px;width:100%" data-adv="">${icon('open')} فتح لوحة الوضع المتقدم</button>
+  return `<div class="label">التداول</div><div class="set">
+      <div class="item"><div class="t">التداول<small>${stopped ? 'متوقف: لا تنفيذ ولا اقتراحات' : 'يعمل — اضغط للإيقاف الفوري (إيقاف الطوارئ)'}</small></div><button class="switch ${stopped ? '' : 'on'}" data-act="${stopped ? 'resume' : 'stop'}" aria-label="التداول"></button></div>
+      ${radio('PAPER', 'ورقي', 'يسجّل الفرص ويقيس نتائجها، دون تنفيذ.')}
+      ${radio('ALERT', 'تنبيه', 'ينبّهك بكل فرصة، والقرار لك.')}
+      ${radio('MANUAL', 'تأكيد يدوي', 'يطلب تأكيدك قبل كل صفقة.')}
+      ${radio('AUTO', 'تلقائي', 'ينفّذ الفرص المؤهلة دون سؤالك، في التبويبات المفعّلة.')}</div>
+    <div class="label">الفريم</div><div class="set">
+      ${Array.isArray(c.solo) ? `<div class="item stack"><div class="t">وضع استراتيجيات mostafa elashhab شغّال<small>من لوحة البوت في المنصة: ${c.solo.length} استراتيجية، كل واحدة على فريمها ومدتها. لإيقافه اختر وضعًا آخر من اللوحة.</small></div></div></div>`
+      : c.solo ? `<div class="item stack"><div class="t">وضع كيلتنر 10 دقائق شغّال<small>من لوحة البوت في المنصة: استراتيجية كيلتنر وحدها، شموع 10 دقائق، صفقة 30 دقيقة. الحساب الحقيقي لا يدخل إلا بعد أن تُثبت نتائجها المقاسة أنها تربح. لإيقافه اختر وضعًا آخر من اللوحة.</small></div></div></div>`
+      : `<div class="item stack"><div class="t">فريم التحليل<small>${c.onlyFrame === 600 ? 'شموع 10 دقائق فقط، والصفقة 30 دقيقة (المنصة ليس فيها مدة 10 دقائق، و30 دقيقة هي المدة التي اختُبر عليها).' : 'النظام يختار لكل زوج الفريم الأوضح، في حدود أقصى مدة للصفقة.'}</small></div>
+        <div class="seg">${[['auto', 'تلقائي'], ['600', '10 دقائق']].map(([v, l]) => `<button class="${String(c.onlyFrame || 'auto') === v ? 'on' : ''}" data-frame="${v}">${l}</button>`).join('')}</div></div></div>`}
+    <p class="note" style="margin-top:8px">الأزواج والاستراتيجيات وتوقيت الدخول يختارها النظام. لا صفقة إلا إذا أثبتت النتائج السابقة أن هذا النوع من الفرص يربح.</p>
+    <details class="adv-set"${S.advOpen ? ' open' : ''}><summary>${icon('chev')}<span>إعدادات متقدمة</span></summary>
+      <div class="set">
+        <div class="item stack"><div class="t">أقصى مدة للصفقة<small>فريم 5 ثوانٍ يبقى دائمًا (صفقة 3 ثوانٍ تُقرأ منه)؛ الفريمات وإشارات النسخ الأطول من الحد لا تُستخدم.</small></div>
+          <div class="seg wrap">${[[3, '3ث'], [15, '15ث'], [30, '30ث'], [60, 'دقيقة'], [180, '3د'], [300, '5د'], [1800, '30د'], [0, 'بلا حد']].map(([v, l]) => `<button class="${(c.maxTradeSec || 0) === v ? 'on' : ''}" data-maxtrade="${v}">${l}</button>`).join('')}</div></div>
+        <div class="item"><div class="t">أقل نسبة ربح (%)<small>عند ${c.gate?.minPayout ?? 80}% التعادل ${OTC.U.breakEven(c.gate?.minPayout ?? 80).toFixed(1)}%</small></div>${stepper('gate.minPayout', c.gate?.minPayout ?? 80, 50, 100)}</div>
+        <div class="item"><div class="t">تجربة الفرص غير المؤكدة على الديمو<small>فرص بلا نتائج سابقة كافية تُنفَّذ على الحساب التجريبي فقط (للتجربة). الحساب الحقيقي لا يدخلها أبدًا.</small></div><button class="switch ${c.gate?.requireHistory === false ? 'on' : ''}" data-demotest aria-label="تجربة الفرص غير المؤكدة"></button></div>
+        ${mode === 'AUTO' ? `<div class="item"><div class="t">التلقائي على الحساب التجريبي</div>${seg('autodemo', [['all', 'كل الفرص المؤهلة'], ['promoted', 'المعتمدة فقط']], c.autoDemoAll !== false ? 'all' : 'promoted')}</div>
+        <div class="item"><div class="t">التلقائي على الحساب الحقيقي</div>${seg('autoreal', [['all', 'كل الفرص المؤهلة'], ['promoted', 'المعتمدة فقط']], c.autoRealAll === true ? 'all' : 'promoted')}</div>
+        <div class="item"><div class="t">استراتيجيات يوتيوب على الحقيقي: المُثبتة فقط<small>الاستراتيجية تدخل بأموال حقيقية فقط بعد ${c.ytRealGate?.minN ?? 75} إشارة على الأقل بنفس المدة تتجاوز نقطة التعادل. غير ذلك: بحث فقط (والديمو يعمل كالمعتاد).</small></div><button class="switch ${c.ytRealGate?.on !== false ? 'on' : ''}" data-ytrealgate aria-label="المُثبتة فقط على الحقيقي"></button></div>
+        <div class="item"><div class="t">فتح الزوج تلقائيًا<small>التبويب المفعّل يفتح زوج الفرصة من قائمة الأزواج في المنصة</small></div>${seg('autoswitch', [['on', 'تشغيل'], ['off', 'إيقاف']], c.autoSwitch !== false ? 'on' : 'off')}</div>` : ''}</div>
+      <div class="label space">الحماية</div><div class="set">
+        <div class="item"><div class="t">إيقاف بعد خسائر متتالية</div>${stepper('risk.maxConsecutiveLosses', c.risk.maxConsecutiveLosses, 1, 20)}</div>
+        <div class="item"><div class="t">حد الصفقات اليومي</div>${stepper('risk.maxTradesPerDay', c.risk.maxTradesPerDay, 1, 200)}</div>
+        <div class="item"><div class="t">استراحة بعد الخسارة (دقائق)</div>${stepper('risk.lossCooldownMin', c.risk.lossCooldownMin, 0, 60)}</div>
+        <div class="item"><div class="t">صفقات مفتوحة في نفس الوقت</div>${stepper('risk.maxConcurrent', c.risk.maxConcurrent, 1, 5)}</div>
+        <div class="item"><div class="t">انتظار قبل تكرار نفس الزوج (دقائق)</div>${stepper('risk.pairCooldownMin', c.risk.pairCooldownMin ?? 10, 0, 60)}</div>
+        <div class="item"><div class="t">عدادات اليوم<small>${s.risk ? `${s.risk.trades ?? 0} صفقة · ${s.risk.consecLosses ?? 0} خسائر متتالية · الصافي ${(s.risk.net ?? 0).toFixed(2)} رهان` : ''}</small></div><button class="btn small" data-act="resetday">تصفير</button></div></div>
+      <div class="label space">التنبيهات والمظهر</div><div class="set">
+        <div class="item"><div class="t">تنبيه الفرص</div>${seg('notify', [['browser', 'المتصفح'], ['sound', 'مع صوت'], ['none', 'بدون']], c.ui?.notify || 'browser')}</div>
+        <div class="item"><div class="t">الوضع الداكن</div><button class="switch ${P.theme === 'dark' ? 'on' : ''}" data-pref="theme" aria-label="الوضع الداكن"></button></div>
+        <div class="item"><div class="t">حجم الواجهة</div>${seg('size', [['normal', 'عادي'], ['large', 'كبير']], P.size)}</div>
+        <div class="item"><div class="t">التفاصيل الفنية<small>تظهر في شاشة التحليل</small></div><button class="switch ${P.advanced ? 'on' : ''}" data-pref="advanced" aria-label="التفاصيل الفنية"></button></div></div>
+      <button class="btn" style="margin-top:14px;width:100%" data-adv="">${icon('open')} فتح لوحة الوضع المتقدم</button>
+    </details>
     <p class="dim" style="margin-top:12px;text-align:center">النتائج السابقة لا تضمن نتائج مستقبلية.</p>`;
 }
 
@@ -326,7 +349,8 @@ function analysisHtml(p) {
   const frameWord = (x) => (x.usable === false ? 'غير واضح الآن' : x.watch ? AR.OPP_STATE[x.watch.state] : x.decision && x.decision !== 'SKIP' ? `فرصة ${AR.dir(x.decision)}` : x.conflict ? 'متعارض' : x.lean ? `ميل ${AR.dir(x.lean)}` : 'لا توجد فرصة');
   const roles = (x) => (x.roles ? `السياق ${AR.frame(x.roles.MID)}${x.roles.TIMING ? ` · التأكيد ${AR.frame(x.roles.TIMING)}` : ' · بلا فريم تأكيد'}` : '');
   return `<div class="sec"><h3>القرار</h3><div class="opp-head"><span class="big ${d.dir && d.verdict === 'ENTER' ? `word ${d.dir}` : ''}">${e(d.verdict === 'ENTER' ? AR.dir(d.dir) : d.verdict === 'WAIT' ? 'انتظار' : 'لا دخول')}</span>${statusPill(d)}</div>
-      <p class="note">${e(d.title)}${d.timer && d.timer.sec > 0 ? ` · ${e(d.timer.label)} ${AR.clock(d.timer.sec)}` : ''}</p>${decisionRows(d)}</div>
+      <p class="note">${e(d.title)}${d.timer && d.timer.sec > 0 ? ` · ${e(d.timer.label)} ${AR.clock(d.timer.sec)}` : ''}</p>${decisionRows({ rows: d.rows.filter((r) => r[0] !== 'الاستراتيجيات') })}</div>
+    ${consHtml(p.opp?.cons || L?.cons, p.opp?.dir || L?.lean)}
     ${frames.length ? `<div class="sec"><h3>الفريمات</h3>${frames.map(([tf, x]) => `<div class="kv"><span>${e(AR.frame(+tf))}</span><span>${e(frameWord(x))}${x.kind && x.decision !== 'SKIP' ? ` · ${e(AR.kind(x.kind))}` : ''}</span></div>${x.usable && x.roles ? `<div class="dim" style="margin:-2px 0 4px">${e(roles(x))}</div>` : ''}`).join('')}</div>` : ''}
     ${f.dir ? `<div class="sec"><h3>نوع الفرصة</h3><div>${e(AR.kind(f.kind))}${d.verdict !== 'ENTER' ? ` <span class="dim">(الميل: ${AR.dir(f.dir)})</span>` : ''}</div></div>` : ''}
     <div class="sec"><h3>الاتجاه</h3>${AR.trendRows(f).map(([k, v]) => `<div class="kv"><span>${e(k)}</span><span>${e(v)}</span></div>`).join('')}
@@ -350,6 +374,17 @@ function analysisHtml(p) {
     </details>`;
 }
 
+// Which strategy families agree, which are against, and the strategies leading it.
+function consHtml(c, dir) {
+  if (!c) return '';
+  const fam = (xs) => (xs || []).map((x) => AR.FAMILY[x] || x).join('، ');
+  const mine = c.dir === dir ? c.fam : [];
+  return `<div class="sec"><h3>الاستراتيجيات</h3><div>${e(AR.consText(c, dir) || '')}</div>
+    <div class="kv"><span>الحالة</span><span>${e(AR.CONS_STATUS[c.s] || '—')}</span></div>
+    ${mine.length ? `<div class="kv"><span>العائلات المتفقة</span><span>${e(fam(mine))}</span></div>` : ''}
+    ${c.agree?.length && c.dir === dir ? `<div class="dim" style="margin-top:4px">${e(c.agree.slice(0, 5).map(AR.strategyName).join('، '))}</div>` : ''}</div>`;
+}
+
 function recordHtml(r) {
   const { dir, R } = resultOf(r), f = r.facts, w = AR.why(f);
   return `<div class="sec"><div class="opp-head"><span class="big word ${dir}">${AR.dir(dir)}</span><span>${R ? AR.RESULT[R].text : 'بانتظار النتيجة'}</span></div>
@@ -369,16 +404,28 @@ function bind() {
   const v = $('#view');
   v.querySelectorAll('[data-pair]').forEach((b) => (b.onclick = () => openSheet('pair', b.dataset.pair, b.dataset.tabId)));
   v.querySelectorAll('[data-rec]').forEach((b) => (b.onclick = () => openSheet('rec', b.dataset.rec)));
-  v.querySelectorAll('[data-go]').forEach((b) => (b.onclick = () => { S.tab = b.dataset.go; render(); }));
+  v.querySelectorAll('[data-go]').forEach((b) => (b.onclick = () => { if (globalThis.PO_EDITION?.locked) return; S.tab = b.dataset.go; render(); }));
   v.querySelectorAll('[data-adv]').forEach((b) => (b.onclick = () => openAdvanced(b.dataset.adv)));
   // pointerdown: the home view redraws every second during a countdown and could swallow a click
   v.querySelectorAll('[data-act]').forEach((b) => (b.onpointerdown = () => act(b.dataset.act, b.dataset.id)));
   v.querySelectorAll('[data-notify]').forEach((b) => (b.onclick = () => send({ type: 'setConfig', patch: { ui: { notify: b.dataset.notify } } })));
   v.querySelectorAll('[data-size]').forEach((b) => (b.onclick = () => setPref('size', b.dataset.size)));
-  v.querySelectorAll('[data-frame]').forEach((b) => (b.onclick = () => {
-    const cur = S.snap?.cfg?.setupFrames || [], tf = +b.dataset.frame;
-    const next = cur.includes(tf) ? cur.filter((x) => x !== tf) : [...cur, tf].sort((x, y) => x - y);
-    if (next.length) send({ type: 'setConfig', patch: { setupFrames: next } }); // at least one frame stays on
+  v.querySelectorAll('[data-maxtrade]').forEach((b) => (b.onclick = () => send({ type: 'setConfig', patch: { maxTradeSec: +b.dataset.maxtrade || null } })));
+  // 10-minute frame: its trades last 30 minutes, so the maximum duration must allow them
+  v.querySelectorAll('[data-frame]').forEach((b) => (b.onclick = () => send({ type: 'setConfig', patch: b.dataset.frame === 'auto' ? { onlyFrame: null }
+    : { onlyFrame: +b.dataset.frame, maxTradeSec: Math.max(S.snap?.cfg?.maxTradeSec || Infinity, 1800) === Infinity ? null : 1800 } })));
+  const adv = v.querySelector('details.adv-set');
+  if (adv) adv.ontoggle = () => (S.advOpen = adv.open);
+  v.querySelectorAll('[data-demotest]').forEach((b) => (b.onclick = async () => {
+    const allow = S.snap?.cfg?.gate?.requireHistory !== false;
+    if (allow && !(await ask('تجربة الفرص غير المؤكدة على الديمو؟', 'سينفّذ النظام على الحساب التجريبي فرصًا لم تُثبت نتائجها السابقة أنها تربح، للتجربة فقط.\nالحساب الحقيقي لا يدخل هذه الفرص أبدًا.', 'تفعيل'))) return;
+    send({ type: 'setConfig', patch: { gate: { requireHistory: !allow } } });
+  }));
+  v.querySelectorAll('[data-ytrealgate]').forEach((b) => (b.onclick = async () => {
+    const on = S.snap.cfg.ytRealGate?.on === false;
+    if (!on && !(await ask('إدخال كل إشارات يوتيوب على الحقيقي؟',
+      'سيدخل بأموال حقيقية في كل إشارة، بما فيها استراتيجيات نتائجها المسجلة تحت نقطة التعادل.\nعلى بياناتك (5 أكتوبر): 45.3% من 181 إشارة، والتعادل 52.1%.', 'نعم، بدون فحص'))) return;
+    send({ type: 'setConfig', patch: { ytRealGate: { on } } });
   }));
   v.querySelectorAll('[data-autoswitch]').forEach((b) => (b.onclick = () => send({ type: 'setConfig', patch: { autoSwitch: b.dataset.autoswitch === 'on' } })));
   v.querySelectorAll('[data-autodemo]').forEach((b) => (b.onclick = () => send({ type: 'setConfig', patch: { autoDemoAll: b.dataset.autodemo === 'all' } })));
@@ -397,7 +444,7 @@ function bind() {
   v.querySelectorAll('[data-mode]').forEach((b) => (b.onclick = async () => {
     const m = b.dataset.mode;
     if (m === 'AUTO' && !(await ask('تفعيل التنفيذ التلقائي؟',
-      'سيتم تنفيذ صفقات دون سؤالك في التبويبات التي فعّلتها للتنفيذ.\nعلى الحساب التجريبي: كل قرارات المحرك. على الحساب الحقيقي: الأنماط التي اعتمدتها فقط.\nحدود الحماية تبقى فعّالة، والنتائج السابقة لا تضمن نتائج مستقبلية.', 'تفعيل'))) return;
+      'سيتم تنفيذ صفقات دون سؤالك في التبويبات التي فعّلتها للتنفيذ — الفرص التي أثبتت نتائجها السابقة أنها تربح فقط.\nحدود الحماية تبقى فعّالة، والنتائج السابقة لا تضمن نتائج مستقبلية.', 'تفعيل'))) return;
     send({ type: 'setConfig', patch: { execMode: m } });
   }));
   v.querySelectorAll('[data-promote]').forEach((b) => (b.onclick = async () => {
@@ -405,6 +452,11 @@ function bind() {
     send({ type: 'discPromote', id: b.dataset.promote }); setTimeout(render, 700);
   }));
   v.querySelectorAll('[data-suspend]').forEach((b) => (b.onclick = () => { send({ type: 'discSuspend', id: b.dataset.suspend }); setTimeout(render, 700); }));
+  v.querySelectorAll('[data-resume]').forEach((b) => (b.onclick = () => { send({ type: 'discResume', id: b.dataset.resume }); setTimeout(render, 700); }));
+  v.querySelectorAll('[data-retire]').forEach((b) => (b.onclick = async () => {
+    if (!(await ask('إيقاف نهائي؟', 'لن تُستخدم هذه الاستراتيجية ولن تُختبر مرة أخرى، وتبقى في السجل للرجوع إليها.', 'إيقاف نهائي'))) return;
+    send({ type: 'discRetire', id: b.dataset.retire }); setTimeout(render, 700);
+  }));
 }
 
 async function act(what, id) {
@@ -423,6 +475,7 @@ async function act(what, id) {
 
 $('#power').onclick = () => act(S.snap?.risk?.emergency ? 'resume' : 'stop');
 const TAB_LABEL = { home: ['home', 'الرئيسية'], pairs: ['pairs', 'الأزواج'], history: ['history', 'السجل'], research: ['research', 'البحث'], settings: ['settings', 'الإعدادات'] };
+if (globalThis.PO_EDITION?.locked) { S.tab = 'home'; document.getElementById('tabs').style.display = 'none'; }
 document.querySelectorAll('#tabs button').forEach((b) => {
   const [ic, label] = TAB_LABEL[b.dataset.tab];
   b.innerHTML = `${icon(ic)}<span>${label}</span>`;

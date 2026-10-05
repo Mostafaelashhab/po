@@ -78,7 +78,7 @@
           if (!dq.ok) return null;
           const X = OTC.Pipeline.buildContext(series, { cfg });
           const scan = OTC.Pipeline.fastScan(X);
-          const analysis = engine ? OTC.Pipeline.deepAnalyze(X, { dq, scan }) : null;
+          const analysis = engine ? OTC.Pipeline.deepAnalyze(X, { dq, scan, reliability: null }) : null;
           return { time: endT, asset: src.asset, payout, entry: c5[i].close, out, vec: FL.vector(FL.context(X, { scan, analysis, time: endT, candleTime: T, asset: src.asset })) };
         });
         if (!row) { dqSkipped++; continue; }
@@ -95,15 +95,36 @@
     return ds;
   }
 
+  // Market states (engine/research.js) → a discovery dataset: only the normalized state features (and the pair),
+  // outcomes at the research horizons (candles of tf). Discovery then runs on it exactly as on the pipeline's
+  // dataset, so a rule found here means the same thing live (the pipeline builds the same state, X.state).
+  function datasetFromStates(states, { tf, horizons, payoutByAsset = {}, defaultPayout = 85, maxRows = 25000 } = {}) {
+    const feats = FL.FEATURES.filter((f) => f.group === 'state' || f.id === 'pair');
+    const sorted = [...states].sort((a, b) => a.t - b.t);
+    const step = Math.max(1, Math.ceil(sorted.length / maxRows)), rows = [];
+    for (let i = 0; i < sorted.length; i += step) {
+      const s = sorted[i];
+      if (!s.out || !s.f) continue;
+      const out = horizons.map((N) => { const k = s.hs.indexOf(N); return k < 0 ? NA : s.out.dir[k]; });
+      if (out.every((o) => o === NA)) continue;
+      rows.push({ time: s.t + tf, asset: s.asset, payout: payoutByAsset[s.asset] ?? defaultPayout, entry: s.price, out,
+        vec: FL.vectorOf({ state: s, asset: s.asset, time: s.t + tf }, feats) });
+    }
+    rows.sort((a, b) => a.time - b.time || (a.asset < b.asset ? -1 : a.asset > b.asset ? 1 : 0));
+    const ds = columnar(rows, { expiries: horizons }, { source: 'market-states', step, sources: [...new Set(rows.map((r) => r.asset))].map((asset) => ({ asset })) }, feats);
+    ds.tf = tf;
+    return ds;
+  }
+
   // Rows → typed columns. Categorical values are dictionary-encoded.
-  function columnar(rows, dc, meta = {}) {
+  function columnar(rows, dc, meta = {}, features = FL.FEATURES) {
     const n = rows.length, assets = [...new Set(rows.map((r) => r.asset))].sort();
     const ds = {
       n, assets, expiries: dc.expiries.slice(), time: new Float64Array(n), asset: new Int16Array(n), payout: new Float32Array(n),
       entry: new Float64Array(n), out: {}, cols: {}, meta,
     };
     dc.expiries.forEach((N) => (ds.out[N] = new Int8Array(n)));
-    for (const f of FL.FEATURES) {
+    for (const f of features) {
       ds.cols[f.id] = f.type === 'num' ? { type: 'num', data: new Float64Array(n).fill(NaN) }
         : f.type === 'bool' ? { type: 'bool', data: new Int8Array(n).fill(-1) } : { type: 'cat', data: new Int16Array(n).fill(-1), dict: [] };
     }
@@ -111,7 +132,7 @@
     rows.forEach((r, i) => {
       ds.time[i] = r.time; ds.asset[i] = assets.indexOf(r.asset); ds.payout[i] = r.payout; ds.entry[i] = r.entry;
       dc.expiries.forEach((N, k) => (ds.out[N][i] = r.out[k]));
-      for (const f of FL.FEATURES) {
+      for (const f of features) {
         const v = r.vec[f.id], col = ds.cols[f.id];
         if (v == null) continue;
         if (col.type === 'num') col.data[i] = v;
@@ -244,6 +265,6 @@
 
   OTC.Discovery = Object.assign(OTC.Discovery || {}, {
     NA, Phi, pAbove, bhQ, twoPropZ, sampleClass, wlo,
-    buildDataset, columnar, prepareOutcomes, atomMask, ruleMask, evalMask, evalRule, summarize, strip, breakdown, catAt, splits, range, foldBounds,
+    buildDataset, datasetFromStates, columnar, prepareOutcomes, atomMask, ruleMask, evalMask, evalRule, summarize, strip, breakdown, catAt, splits, range, foldBounds,
   });
 })(typeof globalThis !== 'undefined' ? globalThis : this);

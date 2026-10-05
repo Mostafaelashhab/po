@@ -181,12 +181,146 @@ test('factory: rejects single-condition strategies and duplicate ids; ambiguous 
 });
 
 test('strategy output has the standard fields', () => {
-  const fired = OTC.Strategies.runAll(ctxFor(up(400)).X, { allowedFamilies: cfg.regimeFamilies.TRENDING_UP });
+  const fired = OTC.Strategies.runAll(ctxFor(up(400)).X);
   assert.ok(fired.length > 0);
   for (const k of ['strategy', 'direction', 'confidence', 'regime', 'conditions_met', 'conditions_failed', 'supporting_evidence', 'contradicting_evidence', 'invalidation_conditions', 'active']) {
     assert.ok(k in fired[0], k);
   }
   assert.ok(fired.some((x) => x.direction === 'CALL'));
+});
+
+// ── strategy consensus ───────────────────────────────────────────────────────
+// fired strategies as runAll returns them (only what the consensus reads)
+const fire = (list) => list.map(([strategy, direction, confidence = 80, valid = true]) => ({ strategy, direction, confidence, valid, active: valid && confidence >= 60 }));
+const ctxC = { asset: 'EURUSD_otc', frame: 60, regime: 'TRENDING_UP' };
+
+test('consensus: every strategy gives CALL / PUT / WAIT / NO_SIGNAL; agreement across 3+ families with none against is AGREE', () => {
+  const c = OTC.Consensus.evaluate(fire([['trend_following', 'CALL'], ['rsi_momentum', 'CALL'], ['bos_continuation', 'CALL'], ['bullish_engulfing', 'CALL'], ['pin_bar', 'CALL', 50]]), ctxC, { cfg });
+  assert.equal(c.dir, 'CALL');
+  assert.equal(c.status, 'AGREE');
+  assert.deepEqual([...c.families.CALL].sort(), ['MOMENTUM', 'PRICE_ACTION', 'STRUCTURE', 'TREND']);
+  assert.equal(c.counts.total, OTC.Strategies.list().length, 'every strategy answers');
+  assert.equal(c.counts.CALL, 4);
+  assert.equal(c.counts.WAIT, 1, 'a weak setup is WAIT, not a signal');
+  assert.equal(c.counts.NO_SIGNAL, c.counts.total - 5);
+  for (const s of c.signals) assert.ok(['CALL', 'PUT', 'WAIT'].includes(s.signal));
+  const put = OTC.Consensus.evaluate(fire([['trend_following', 'PUT'], ['rsi_momentum', 'PUT'], ['bearish_engulfing', 'PUT']]), ctxC, { cfg });
+  assert.equal(put.dir, 'PUT');
+  assert.equal(put.status, 'AGREE');
+});
+
+test('consensus: correlated strategies are one family — four trend readings are not four confirmations', () => {
+  const trendOnly = OTC.Consensus.evaluate(fire([['trend_following', 'CALL'], ['trend_continuation', 'CALL'], ['ema_pullback', 'CALL'], ['ma_alignment', 'CALL']]), ctxC, { cfg });
+  assert.equal(trendOnly.status, 'WEAK', 'one family, however many strategies');
+  assert.deepEqual([...trendOnly.families.CALL], ['TREND']);
+  const diverse = OTC.Consensus.evaluate(fire([['trend_following', 'CALL'], ['rsi_momentum', 'CALL'], ['bos_continuation', 'CALL'], ['range_breakout', 'CALL']]), ctxC, { cfg });
+  assert.ok(diverse.support.CALL > trendOnly.support.CALL, 'four families outweigh four members of one family');
+  // duplicates add only 30% each inside a family
+  assert.ok(Math.abs(trendOnly.support.CALL - 0.8 * (1 + 0.3 * 3)) < 0.01, String(trendOnly.support.CALL));
+});
+
+test('consensus: balanced or opposed families are SPLIT, never a trade', () => {
+  const c = OTC.Consensus.evaluate(fire([['trend_following', 'CALL'], ['rsi_momentum', 'CALL'], ['bos_continuation', 'CALL'], ['mean_reversion', 'PUT']]), ctxC, { cfg });
+  assert.equal(c.dir, 'CALL');
+  assert.equal(c.status, 'SPLIT', 'a whole family against');
+  assert.deepEqual([...c.families.PUT], ['MEAN_REVERSION']);
+  const none = OTC.Consensus.evaluate([], ctxC, { cfg });
+  assert.equal(none.status, 'NONE');
+  assert.equal(none.dir, null);
+});
+
+test('consensus: reliability comes from each strategy\'s own record — wrong here → no vote; an edge counts only if it held before', () => {
+  const tables = { keys: {
+    'rsi_momentum|60': [100, 35, 100, 40],    // recent 35%: mostly wrong on 1M
+    'trend_following|60': [100, 60, 100, 45], // recent 60% but older 45%: did not hold
+    'bos_continuation|60': [100, 60, 100, 58], // held: counts more
+  } };
+  const c = OTC.Consensus.evaluate(fire([['trend_following', 'CALL'], ['rsi_momentum', 'CALL'], ['bos_continuation', 'CALL'], ['bullish_engulfing', 'CALL']]), ctxC, { tables, cfg });
+  assert.ok(c.muted.includes('rsi_momentum'));
+  assert.ok(!c.families.CALL.includes('MOMENTUM'), 'a muted strategy gives its family no vote');
+  const w = (id) => c.signals.find((s) => s.id === id).w;
+  assert.equal(w('trend_following'), 1, 'unproven edge stays neutral');
+  assert.ok(w('bos_continuation') > 1);
+  assert.equal(w('bullish_engulfing'), 1, 'no record: neutral');
+  assert.equal(c.agree[0], 'bos_continuation', 'the most reliable signal leads');
+  // a context with no record falls back to the broader key
+  const r = OTC.Consensus.reliability('bos_continuation', { asset: 'GBPUSD_otc', frame: 60, regime: 'RANGING' }, tables, cfg);
+  assert.equal(r.key, 'bos_continuation|60');
+});
+
+test('consensus: reliability tables are built from analysed closes (next candle), newest part measured, live preferred over backtest', () => {
+  const recs = [];
+  for (let i = 0; i < 100; i++) {
+    const up = i % 4 !== 0; // 75% of next candles go up
+    const base = { asset: 'EURUSD_otc', tf: 60, candleTime: 1000 + 60 * i, ts: 1060 + 60 * i, regime: 'TRENDING_UP', entryPrice: 1, exits: { 1: up ? 1.001 : 0.999 }, status: 'resolved',
+      strategies: [['trend_following', 'CALL', 80, 1], ['rsi_momentum', 'PUT', 50, 0]] };
+    recs.push({ ...base, source: 'live' });
+    if (i < 10) recs.push({ ...base, source: 'backtest', exits: { 1: 0.5 } }); // same candles: ignored
+  }
+  const t = OTC.Consensus.buildReliability(recs, cfg);
+  assert.equal(t.meta.records, 100);
+  const x = t.keys['trend_following|60'];
+  assert.equal(x[0], 40, 'newest 40%');
+  assert.equal(x[0] + x[2], 100);
+  assert.equal(t.keys['rsi_momentum|60'], undefined, 'weak signals (WAIT) are not measured');
+  assert.ok(OTC.Consensus.reliability('trend_following', ctxC, t, cfg).w > 1);
+});
+
+test('calibration: an unmeasured opportunity says how far its kind is from being judged (outcomes so far / needed)', () => {
+  const recs = [];
+  for (let i = 0; i < 40; i++) recs.push({ id: `o${i}`, kind: 'opp', tf: 1, frame: 5, setup: 'pin_bar', setupKind: 'reversal', lean: 'PUT', decision: 'SKIP', regime: 'RANGING', asset: 'EURUSD_otc',
+    ts: 1000 + 10 * i, entryPrice: 1, exits: { 3: i % 2 ? 0.999 : 1.001 }, path: ['DISCOVERED', 'CONFIRMED', 'GATED'], status: 'pending', payout: 85 });
+  const t = OTC.Calibration.buildTables(recs, cfg);
+  const a = OTC.Calibration.assess({ frame: 5, setup: 'pin_bar', kind: 'reversal', dir: 'PUT', regime: 'RANGING', asset: 'EURUSD_otc', payout: 85 }, t, { cfg, available: [3] });
+  assert.equal(a.status, 'INSUFFICIENT_DATA');
+  assert.equal(a.need, 75);
+  assert.equal(a.have, 40);
+  assert.match(require("./load.js").load().AR.calText({ ...a, expirySec: 3 }), /40 من 75/);
+});
+
+test('calibration: direction is learned on the older part only — the newer part measures it, never picks it', () => {
+  const c = { frame: 60, setup: 'ema_pullback', kind: 'pullback', dir: 'CALL', regime: 'RANGING', asset: 'EURUSD_otc', payout: 85 };
+  const table = (cell) => ({ entries: { '60|ema_pullback|CALL': { 60: cell } }, setups: {} });
+  const opts = { cfg, available: [60], learnDirection: true };
+  // older: the setup lost 62% → reverse; newer: reversing would have lost → measured, no edge (not "pick the better side")
+  const flip = OTC.Calibration.assess(c, table({ sel: [38, 62], oos: [42, 28], folds: [[30, 20], [30, 20], [30, 20]], n: 170 }), opts);
+  assert.equal(flip.reversed, true);
+  assert.ok(flip.measured && flip.ev < 0, JSON.stringify(flip));
+  // older: it won → traded with the setup, even though reversing would have done better in the newer part
+  const keep = OTC.Calibration.assess(c, table({ sel: [62, 38], oos: [28, 42], folds: [[20, 30], [20, 30], [20, 30]], n: 170 }), opts);
+  assert.ok(!keep.reversed);
+  assert.ok(keep.ev < 0);
+  // held in both parts and every period → reversed with a positive expected value
+  const real = OTC.Calibration.assess(c, table({ sel: [38, 62], oos: [28, 52], folds: [[20, 33], [20, 33], [20, 33]], n: 180 }), opts);
+  assert.ok(real.reversed && real.ev > 0 && real.stable, JSON.stringify(real));
+  // without learning, the same table is just "no edge"
+  assert.ok(!OTC.Calibration.assess(c, table({ sel: [38, 62], oos: [28, 52], folds: [[20, 33], [20, 33], [20, 33]], n: 180 }), { cfg, available: [60] }).reversed);
+  // the monitor scores a reversed entry in the direction it was traded
+  const rec = { kind: 'opp', tf: 1, lean: 'CALL', fade: true, expirySec: 60, entryPrice: 1, exits: { 60: 0.99 }, path: ['ENTERED'], payout: 85, cal: { measured: true, qualified: true, winProb: 60 } };
+  const m = OTC.Calibration.monitor(Array.from({ length: 40 }, (_, i) => ({ ...rec, ts: i })), cfg);
+  assert.equal(m.top.w, 40, 'price fell: the PUT that was traded won');
+});
+
+test('self-check: judged on the recent window, so a rejected model is re-judged once the entries that sank it are old', () => {
+  const entry = (ts, win) => ({ kind: 'opp', tf: 1, ts, lean: 'CALL', expirySec: 60, entryPrice: 1, exits: { 60: win ? 1.01 : 0.99 }, path: ['ENTERED'], payout: 85, cal: { measured: true, qualified: true, winProb: 60 } });
+  const old = Array.from({ length: 60 }, (_, i) => entry(1000 + i * 60, i % 4 === 0)); // 25% wins, long ago
+  assert.equal(OTC.Calibration.monitor(old, cfg).status, 'REJECTED');
+  const later = [...old, entry(1000 + 72 * 3600, true)]; // three days later: the window holds only the new entry
+  assert.equal(OTC.Calibration.monitor(later, cfg).status, 'COLLECTING');
+});
+
+test('pipeline: the decision follows the consensus — no fixed confidence threshold', () => {
+  const { X } = ctxFor(up(400));
+  const a = OTC.Pipeline.deepAnalyze(X, { reliability: null });
+  assert.ok(a.consensus, 'consensus reported');
+  assert.ok(!a.skipReasons.some((r) => /confidence \d+ </.test(r)), a.skipReasons.join(' / '));
+  if (a.decision !== 'SKIP') {
+    assert.equal(a.consensus.status, 'AGREE');
+    assert.equal(a.decision, a.consensus.dir);
+  } else assert.ok(a.consensus.status !== 'AGREE' || a.skipReasons.length);
+  const rec = OTC.Pipeline.toRecord(X, a, null, { source: 'live', asset: 'EURUSD_otc' });
+  assert.equal(rec.cons.s, a.consensus.status);
+  assert.equal(rec.cons.t, OTC.Strategies.list().length);
 });
 
 // ── confluence and contradiction ─────────────────────────────────────────────
@@ -260,11 +394,11 @@ test('htfWithPartial: closed HTF candles plus the forming one from 5M', () => {
 
 // ── risk engine ──────────────────────────────────────────────────────────────
 test('risk: limits, cooldowns, duplicates, concurrency and currency conflicts', () => {
-  const now = T0 + 10000;
+  const now = T0 + 10000, cfg1 = OTC.config({ risk: { maxConcurrent: 1 } }); // one at a time, to test the limit itself
   let st = OTC.Risk.newRiskState(now);
   const cand = { asset: 'EURUSD_otc', dir: 'CALL', candleTime: now - 300 };
-  assert.equal(OTC.Risk.check(cand, st, cfg, now).ok, true);
-  const codes = (s, c = cand, sel = []) => OTC.Risk.check(c, s, cfg, now, sel).flags.map((f) => f.code);
+  assert.equal(OTC.Risk.check(cand, st, cfg1, now).ok, true);
+  const codes = (s, c = cand, sel = []) => OTC.Risk.check(c, s, cfg1, now, sel).flags.map((f) => f.code);
   assert.ok(codes({ ...st, emergency: 'x' }).includes('EMERGENCY'));
   assert.ok(codes({ ...st, trades: 20 }).includes('MAX_TRADES'));
   assert.ok(codes({ ...st, consecLosses: 4 }).includes('LOSS_STREAK'));
@@ -297,11 +431,11 @@ test('entry timing: window, chasing and sudden opposite moves', () => {
 
 // ── orchestrator ─────────────────────────────────────────────────────────────
 test('orchestrator: ranks simultaneous candidates and lets the risk engine pick', () => {
-  const now = T0 + 305;
+  const now = T0 + 305, cfg1 = OTC.config({ risk: { maxConcurrent: 1 } });
   const mk = (asset, dir, deep) => ({ id: asset, asset, dir, deep, candleTime: T0, evidenceAgainst: [], timing: { quality: 100 } });
   const ranked = OTC.Orchestrator.rank([mk('EURUSD_otc', 'CALL', 72), mk('GBPUSD_otc', 'CALL', 88)], cfg, now);
   assert.equal(ranked[0].asset, 'GBPUSD_otc');
-  const { selected, rejected } = OTC.Orchestrator.selectBatch(ranked, OTC.Risk.newRiskState(now), cfg, now);
+  const { selected, rejected } = OTC.Orchestrator.selectBatch(ranked, OTC.Risk.newRiskState(now), cfg1, now);
   assert.equal(selected.length, 1);
   assert.equal(selected[0].asset, 'GBPUSD_otc');
   assert.equal(rejected[0].flags[0].code, 'MAX_CONCURRENT');

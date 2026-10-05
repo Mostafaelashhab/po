@@ -373,6 +373,7 @@
       ema9: Ind.ema(closes, 9), ema18: Ind.ema(closes, 18), ema21: Ind.ema(closes, 21), ema24: Ind.ema(closes, 24), ema50: Ind.ema(closes, 50), ema200: Ind.ema(closes, 200),
       rsi: Ind.rsi(closes, 14), macd: Ind.macd(closes, 12, 26, 9), stoch: Ind.stochastic(c, 14, 3, 3),
       roc: Ind.roc(closes, 9), atr: Ind.atr(c, 14), adx: Ind.adx(c, 14), bb: Ind.bollinger(closes, 20, 2),
+      ema20: Ind.ema(closes, 20), atr10: Ind.atr(c, 10),
     };
     const a = I.atr[n - 1] || I.atr[n];
     if (!a) return { ready: false, tf, n: c.length };
@@ -381,7 +382,7 @@
     const structure = structureFeatures(c, a);
     const atrPct = U.pctRank(I.atr, 100);
     const lastRange = range(c[n]) / a;
-    return {
+    const out = {
       ready: true, tf, n: c.length, time: c[n].time, price: c[n].close, atr: a, last: c[n], partialLast: !!c[n].partial,
       trend, momentum, structure,
       bb: bollingerFeatures(c, I),
@@ -394,7 +395,17 @@
       volatility: { atrPct, lastRange, abnormal: lastRange > abnormalRangeAtr, atrRatio: atrRatio(I.atr, a),
         state: atrPct == null ? 'UNKNOWN' : atrPct >= 90 ? 'HIGH' : atrPct <= 10 ? 'LOW' : 'NORMAL' },
       recent: c.slice(-30).map((x) => [x.time, x.open, x.high, x.low, x.close]),
+      // Keltner channel (EMA 20 ± 2 × ATR 10), the last 6 candles, oldest first
+      keltner: keltnerTail(I, n, 6),
     };
+    Object.defineProperty(out, 'candles', { value: c, enumerable: false });
+    return out;
+  }
+
+  function keltnerTail(I, n, k) {
+    const out = { mid: [], up: [], lo: [] };
+    for (let j = n - k + 1; j <= n; j++) { const m = I.ema20[j], at = I.atr10[j]; if (m == null || at == null) return null; out.mid.push(m); out.up.push(m + 2 * at); out.lo.push(m - 2 * at); }
+    return out;
   }
 
   OTC.Features = { compute, swings, psychStep, FIB };

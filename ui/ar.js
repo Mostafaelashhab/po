@@ -13,7 +13,7 @@
   const TF = { 60: 'ساعة', 15: '15 دقيقة', 5: '5 دقائق', 1: 'دقيقة' };
   const KIND = {
     pullback: 'ارتداد مع الاتجاه', retest: 'اختراق وإعادة اختبار', breakout: 'اختراق', reversal: 'انعكاس من منطقة مهمة',
-    range: 'ارتداد داخل نطاق', momentum: 'استمرار الزخم', pattern: 'نموذج سعري عند منطقة', trend: 'استمرار الاتجاه', discovered: 'نمط مكتشف',
+    range: 'ارتداد داخل نطاق', momentum: 'استمرار الزخم', pattern: 'نموذج سعري عند منطقة', history: 'موقف تكرر في التاريخ', trend: 'استمرار الاتجاه', discovered: 'نمط مكتشف', copy: 'نسخ مع تحقق',
   };
   const PATTERN = {
     bullish_engulfing: 'ابتلاع شرائي', bearish_engulfing: 'ابتلاع بيعي', pin_bar: 'شمعة رفض', hammer: 'المطرقة', shooting_star: 'النجم الساقط',
@@ -33,7 +33,7 @@
   const RANK = { enter: 0, strong: 1, possible: 2, wait: 3, watch: 4, below: 5, entered: 6, ended: 7, analyzing: 8, none: 9, error: 10 };
 
   // ── opportunities: frames, durations, states ───────────────────────────────
-  const FRAME = { 5: '5 ثوانٍ', 10: '10 ثوانٍ', 15: '15 ثانية', 30: '30 ثانية', 60: 'دقيقة', 300: '5 دقائق', 900: '15 دقيقة', 1800: '30 دقيقة', 3600: 'ساعة' };
+  const FRAME = { 5: '5 ثوانٍ', 10: '10 ثوانٍ', 15: '15 ثانية', 30: '30 ثانية', 60: 'دقيقة', 300: '5 دقائق', 600: '10 دقائق', 900: '15 دقيقة', 1800: '30 دقيقة', 3600: 'ساعة' };
   const frame = (tf) => FRAME[tf] || `${Math.round(tf / 60)} دقيقة`;
   // gen: after a preposition or noun ("بعد انتظار دقيقتين")
   function duration(sec, gen = false) {
@@ -47,7 +47,7 @@
     WAIT_FOR_RETEST: 'انتظار عودة السعر', WAIT_FOR_BREAKOUT: 'انتظار الاختراق', WAIT_FOR_REJECTION: 'انتظار شمعة رفض',
     MISSED_ENTRY: 'فاتت الفرصة', INVALIDATED: 'أُلغيت الفرصة', EXPIRED: 'انتهت الفرصة', NO_SETUP: 'لا توجد فرصة', GATED: 'لم تجتز شروط الدخول',
   };
-  const ENTRY_WHY = { setup_close: 'عند إغلاق شمعة الفرصة', strong_setup: 'فرصة قوية — دخول مباشر', confirmed: 'بعد شمعة تأكيد',
+  const ENTRY_WHY = { history: 'فور تطابق الموقف مع مواقف سابقة', copy: 'فور ظهور إشارة النسخ والتحقق منها', setup_close: 'عند إغلاق شمعة الفرصة', strong_setup: 'فرصة قوية — دخول مباشر', confirmed: 'بعد شمعة تأكيد',
     retest: 'بعد عودة السعر لنقطة الدخول', rejection: 'بعد شمعة رفض' };
   const END_WHY = { price_beyond_invalidation: 'السعر تجاوز النقطة التي تلغي الفكرة', new_contradiction: 'ظهر تعارض قوي بعد التحليل الجديد',
     moved_without_us: 'السعر تحرك قبل أن يتوفر دخول مناسب', validity_over: 'لم يظهر تأكيد خلال مدة صلاحية الفرصة', strong_candle_against: 'شمعة قوية عكس الفكرة' };
@@ -57,8 +57,17 @@
     if (!ex) return '';
     if (ex.source === 'history') return 'المدة التي أعطت أفضل نتائج سابقة لهذا النوع من الفرص';
     if (ex.source === 'discovered') return 'المدة التي اختُبر عليها النمط';
+    if (ex.source === 'strategy') return 'المدة التي شُرحت بها الاستراتيجية في الفيديو';
+    if (ex.source === 'frame') return `المدة التي اختُبر عليها فريم ${frame(ex.reason?.tf) || ''} (المنصة ليس فيها مدة 10 دقائق)`.replace(' ()', '');
+    if (ex.source === 'copy') return 'أقرب مدة تعرضها المنصة للوقت المتبقي من إشارة النسخ';
     const adj = (ex.reason?.adj || []).map((a) => ADJ[a]).filter(Boolean);
     return `تناسب نوع الفرصة على فريم ${frame(ex.reason?.tf)}${adj.length ? ` (${adj.join('، ')})` : ''}`;
+  }
+  // What followed similar past states (engine/research.js), and whether that strength held in the walk-forward test.
+  function histText(h) {
+    if (!h || !h.n) return null;
+    const t = h.tested;
+    return `${DIR[h.dir]} في ${Math.round(h.p)}% من ${h.n} موقف مشابه بعد ${duration(h.sec)}${t ? (t.significant ? ` · صمد ${t.rate}% من ${t.n} في الاختبار` : ' · لم يثبت في الاختبار') : ''}`;
   }
   const framesText = (o) => `${frame(o.tf)}${o.timingTf ? ` · التأكيد من ${frame(o.timingTf)}` : ''}${o.alsoOn?.length ? ` · وتؤيدها ${o.alsoOn.map(frame).join(' و')}` : ''}`;
   function waitFor(o) {
@@ -72,28 +81,48 @@
       default: return null;
     }
   }
-  // Entry gate: payout ≥ 92%, plus the calibrated confidence — P(this kind of setup beats
+  // Entry gate: payout ≥ the user's minimum (popup), plus the calibrated confidence — P(this kind of setup beats
   // break-even), measured on past outcomes — when it has been measured.
   const BLOCK = {
     payout: 'نسبة الربح أقل من المطلوب', payout_unknown: 'نسبة الربح غير معروفة',
     confidence: 'النتائج السابقة لفرص مشابهة لم تتفوق على نقطة التعادل', no_history: 'لا توجد صفقات مشابهة كافية لحساب الثقة بعد',
-    no_edge: 'نتائج الفرص المشابهة لا تعطي ربحًا متوقعًا عند نسبة الربح الحالية', insufficient_data: 'لا توجد بيانات تاريخية كافية للحكم عليها',
+    no_edge: 'نتائج الفرص المشابهة لا تعطي ربحًا متوقعًا عند نسبة الربح الحالية', insufficient_data: 'غير مؤكدة: لا توجد نتائج سابقة كافية — تُسجَّل للتعلم ولا تُنفَّذ',
+    strategies_against: 'الاستراتيجيات متفقة على الاتجاه العكسي',
+    // copy + verify objections
+    no_data: 'لا توجد بيانات كافية لهذا الزوج للتحقق', evidence_against: 'أغلب أدلة الشارت عكس الإشارة', market_unclear: 'السوق غير واضح على الدقيقة و5 دقائق',
+    late: 'الإشارة جاءت بعد أن تحرك السعر بالفعل', copy_flipping: 'قائمة النسخ منقسمة على هذا الزوج: شراء وبيع في نفس الوقت', copy_conflict: 'أغلب إشارات النسخ على هذا الزوج عكسها',
+    too_little_time: 'الوقت المتبقي في الإشارة قصير جدًا', too_long: 'الإشارة أطول من أقصى مدة اخترتها للصفقة', signal_against: 'إشارة المنصة (المُثبتة) عكسها', no_duration: 'لا توجد مدة في المنصة قريبة من الوقت المتبقي في الإشارة',
     no_history_at_duration: 'لا توجد نتائج كافية بهذه المدة', unstable: 'نتائج الفرص المشابهة غير مستقرة عبر الزمن',
     contradiction: 'يوجد تعارض قوي', risk_high: 'المخاطر مرتفعة', data: 'بيانات الزوج غير مكتملة', copy_against: 'إشارات النسخ عكس الفكرة',
     model_rejected: 'نموذج الثقة مرفوض: الفرص التي سمح بها لم تتفوق على نقطة التعادل',
   };
+  // Strategy consensus (engine/consensus.js) in words: how many strategies give the direction, out of those
+  // that gave any signal, and across how many families.
+  const FAMILY = { TREND: 'الاتجاه', MOMENTUM: 'الزخم', PRICE_ACTION: 'حركة السعر', STRUCTURE: 'هيكل السوق', BREAKOUT: 'الاختراق', VOLATILITY: 'التذبذب',
+    LEVELS: 'الدعم والمقاومة', LIQUIDITY: 'السيولة', MEAN_REVERSION: 'الارتداد', HYBRID: 'مركّبة', OTHER: 'أخرى' };
+  function consText(c, dir = c?.dir) {
+    if (!c || !c.n) return c ? 'لا توجد إشارة من أي استراتيجية' : null;
+    const mine = dir === 'CALL' ? c.c : dir === 'PUT' ? c.p : 0, other = dir === 'CALL' ? c.p : c.c;
+    if (c.dir && c.dir !== dir) return `${mine} مع · ${other} ضد (الأغلبية عكسها)`;
+    const fam = c.ff ? ` · ${count(c.ff, 'عائلة واحدة', 'عائلتان', 'عائلات', 'عائلة')}` : '';
+    return `${mine} من ${c.n} استراتيجية متفقة${fam}${c.fa ? ` · ${count(c.fa, 'عائلة واحدة', 'عائلتان', 'عائلات', 'عائلة')} ضد` : ''}`;
+  }
+  const CONS_STATUS = { AGREE: 'اتفاق واضح', SPLIT: 'الاستراتيجيات منقسمة', WEAK: 'اتفاق ضعيف (عائلة أو اثنتان فقط)', NONE: 'لا توجد إشارة' };
   function blockText(cal) {
-    const b = (cal?.blocks || [])[0];
-    if (b === 'payout') return `نسبة الربح ${cal.payout}% — المطلوب ${cal.minPayout ?? 92}% أو أكثر`;
-    return BLOCK[b] || '';
+    const bs = cal?.blocks || [];
+    if (bs[0] === 'payout') return `نسبة الربح ${cal.payout}% — المطلوب ${cal.minPayout ?? 80}% أو أكثر`;
+    return [...new Set(bs.map((b) => BLOCK[b]).filter(Boolean))].slice(0, 3).join('، ');
   }
   // Estimated win probability from similar past opportunities (out-of-sample), or "not established".
   function calText(cal) {
     if (!cal) return null;
-    if (!cal.measured && cal.reason !== 'measured' && cal.reason !== 'unstable') return 'غير مؤكدة: لا توجد بيانات تاريخية كافية للحكم عليها';
+    if (!cal.measured && cal.reason !== 'measured' && cal.reason !== 'unstable') {
+      return cal.need ? `غير مؤكدة: ${Math.min(cal.have || 0, cal.need)} من ${cal.need} نتيجة مطلوبة لفرص من هذا النوع ${cal.expirySec ? ` (${duration(cal.expirySec)})` : ''}`
+        : 'غير مؤكدة: لا توجد بيانات تاريخية كافية للحكم عليها';
+    }
     if (cal.winProb == null) return `${Math.round(cal.p)}%${cal.oos ? ` من ${Math.round(cal.oos.n)} فرصة مشابهة` : ''}`; // older records
     const iv = cal.interval ? ` (${Math.round(cal.interval[0])}–${Math.round(cal.interval[1])}%)` : '';
-    return `احتمال الفوز ${Math.round(cal.winProb)}%${iv} من ${Math.round(cal.n || cal.oos?.n || 0)} فرصة مشابهة${cal.stable === false ? ' — غير مستقر' : ''}`;
+    return `احتمال الفوز ${Math.round(cal.winProb)}%${iv} من ${Math.round(cal.n || cal.oos?.n || 0)} فرصة مشابهة${cal.reversed ? ' (عكس اتجاهها)' : ''}${cal.stable === false ? ' — غير مستقر' : ''}`;
   }
   const payoutText = (cal) => (cal?.payout != null ? `${cal.payout}%` : null);
   const MODEL = { COLLECTING: 'يجمع النتائج', OK: 'سليم حتى الآن', CONFIRMED: 'مؤكَّد بالنتائج', REJECTED: 'مرفوض — التداول متوقف' };
@@ -109,7 +138,13 @@
       case 'placed': case 'confirmed': return { title: 'تم التنفيذ', tone: 'go', live: true };
       case 'unconfirmed': return { title: 'المنصة لم تؤكد الصفقة', tone: 'bad', why: 'تم إيقاف النظام للاحتياط — راجع المنصة' };
       case 'failed': return { title: 'تعذر التنفيذ', tone: 'bad', why: execState({ status: 'failed', reason: a.detail || '' })?.text.replace(/^تعذر التنفيذ: /, '') };
-      case 'shadow': return { title: 'الزوج غير مفتوح للتنفيذ', tone: 'muted', why: 'سُجّلت كصفقة ورقية — افتح هذا الزوج في تبويب مفعّل للتنفيذ' };
+      case 'shadow': return { title: 'الزوج غير مفتوح على شارت تبويب مفعّل', tone: 'muted', why: 'سُجّلت كصفقة ورقية — صفقات الثواني تحتاج الزوج مفتوحًا على الشارت مسبقًا (لا وقت لفتحه)' };
+      case 'notarmed': return { title: 'التبويب غير مفعّل للتنفيذ', tone: 'bad', why: 'اضغط «تشغيل» في لوحة Pocket Option على هذا التبويب — سُجّلت كصفقة ورقية' };
+      // the pair is open, but in a tab set to the other mode
+      case 'othermode': return a.detail === 'copy'
+        ? { title: 'للمتابعة فقط — التبويب على وضع النسخ', tone: 'muted', why: 'هذه فرصة من تحليل المحرك نفسه، ووضع "نسخ + تحقق" يُنفّذ إشارات النسخ فقط؛ سُجّلت كورقية للقياس' }
+        : { title: 'للمتابعة فقط — التبويب على وضع المحرك', tone: 'muted', why: 'وضع المحرك الذكي لا يُنفّذ إشارات النسخ؛ سُجّلت كورقية للقياس' };
+      case 'research': return { title: 'بحث فقط', tone: 'muted', why: 'حساب حقيقي: لا تنفيذ بدون نتائج سابقة كافية تثبت الفكرة' };
       case 'risk': return { title: 'منعتها الحماية', tone: 'muted', why: (a.detail || []).map((c) => RISK_FLAG[c] || c).join('، ') };
       case 'gated': return { title: 'لم تجتز شروط الدخول', tone: 'muted', why: /payout/.test(a.detail || '') ? 'نسبة الربح أقل من المطلوب' : 'لم تعد مؤهلة' };
       case 'paper': return { title: 'صفقة ورقية', tone: 'muted', why: 'وضع المراقبة: لا تنفيذ' };
@@ -123,23 +158,47 @@
 
   // The decision for one pair: ENTER (direction, timing, duration, frames, why), WAIT (what for,
   // what confirms, when it ends) or SKIP (why). Same wording in the popup and the in-page panel.
+  // A copy signal in words: how many trades agree, and how it was found.
+  function copySource(o) {
+    if (o?.kind !== 'copy' || !o.copy) return null;
+    const c = o.copy, n = c.total || 1, same = o.dir === 'CALL' ? c.calls : c.puts;
+    const parts = [`إشارة نسخ${n > 1 ? ` (${same ?? 1} من ${n} متفقة)` : ''}`];
+    if (c.copies) parts.push(`نُسخت ${c.copies} مرة`);
+    if (c.pnl === '-') parts.push('صفقة المتداول خاسرة الآن (سعرك أفضل)');
+    else if (c.pnl === '+') parts.push('صفقة المتداول رابحة الآن');
+    if (c.elapsed != null && c.elapsed > 20) parts.push(`بدأت ${AR_ago(c.elapsed)}`);
+    if (c.left) parts.push(`متبقٍ ${clock(c.left)}`);
+    if (c.late) parts.push('متأخرة');
+    return parts.join(' · ');
+  }
+  const AR_ago = (sec) => (sec < 60 ? `منذ ${Math.round(sec)} ثانية` : `منذ ${Math.round(sec / 60)} دقيقة`);
+
   function decision(p, nowSec, cfg = OTC.DEFAULT_CONFIG) {
     const o = p.opp, rows = [];
     const row = (k, v) => { if (v) rows.push([k, v]); };
+    row('المصدر', copySource(o));
     if (o) {
       const f = o.facts || {};
+      if (o.hist) row('التاريخ المشابه', histText(o.hist));
+      // traded against its setup: its own record says this kind of agreement reverses
+      if (o.fade) row('الفكرة', `عكس ${KIND[o.kind] || 'الفرصة'}: نتائج الفرص المشابهة الحديثة تقول إنها ترتد`);
+      if (Array.isArray(cfg?.solo)) row('الاستراتيجية', (o.combo || o.setup || '').split('+').map((id) => (id === 'keltner_trend_pullback' ? 'كيلتنر 10د' : OTC.Strategies.get(id)?.name || id)).join(' + '));
+      else row('الاستراتيجيات', o.fade ? `${consText(o.cons, o.setupDir) || ''} — والصفقة عكسها` : consText(o.cons, o.dir));
       // Below the calibrated confidence gate (or another final check): not an opportunity to act on.
       if (o.cal && !o.cal.qualified && (o.state === 'GATED' || !['MISSED_ENTRY', 'INVALIDATED', 'EXPIRED', 'ENTERED'].includes(o.state))) {
-        row('أقرب فرصة', `${DIR[o.dir]} · ${KIND[o.kind] || 'فرصة'} · فريم ${frame(o.tf)}`);
-        row('نسبة الربح', payoutText(o.cal)); row('التقدير من البيانات', calText(o.cal)); row('السبب', blockText(o.cal));
-        return { key: 'below', ...STATUS.below, verdict: 'SKIP', dir: o.dir, title: 'لا توجد فرصة مؤهلة', rows, timer: null, facts: f, p: o.cal.p };
+        // the reason first: it is what the user needs to see
+        const isCopy = o.kind === 'copy';
+        row(isCopy ? 'لماذا رُفضت' : 'السبب', blockText(o.cal));
+        row(isCopy ? 'الإشارة' : 'أقرب فرصة', isCopy ? `${DIR[o.dir]} · تحقق على فريم ${frame(o.copy?.verifyFrame || o.facts?.frame || o.tf)}` : `${DIR[o.dir]} · ${KIND[o.kind] || 'فرصة'} · فريم ${frame(o.tf)}`);
+        row('نسبة الربح', payoutText(o.cal)); row('التقدير من البيانات', calText(o.cal));
+        return { key: 'below', ...STATUS.below, verdict: 'SKIP', dir: o.dir, title: isCopy ? 'إشارة نسخ مرفوضة' : 'لا توجد فرصة مؤهلة', rows, timer: null, facts: f, p: o.cal.p };
       }
       if (o.state === 'ENTERED' && o.entry) {
         const win = OTC.entryWindow(cfg, o.entry.tf || o.tf), left = o.entry.time + win - nowSec, end = o.entry.time + (o.expiry?.sec || 0) - nowSec;
         if (left > 0 || end > 0) {
-          row('التوقيت', ENTRY_WHY[o.entry.why] || 'عند إغلاق الشمعة');
-          row('المدة', o.expiry ? `${duration(o.expiry.sec)} — ${expiryWhy(o.expiry)}` : null);
-          row('الفريم', framesText(o)); row('نوع الفرصة', KIND[o.kind] || 'فرصة'); row('نسبة الربح', payoutText(o.cal)); row('التقدير من البيانات', calText(o.cal)); row('إشارات النسخ', copyText(o.copy || f.copy));
+          row('الدخول', left > 0 ? 'الآن' : ENTRY_WHY[o.entry.why] || 'عند إغلاق الشمعة');
+          row('المدة', o.expiry ? duration(o.expiry.sec) : null);
+          row('التقدير من البيانات', calText(o.cal)); row('الفريم', framesText(o)); row('نسبة الربح', payoutText(o.cal)); row('إشارات النسخ', copyText(o.copy || f.copy));
           // what the system really did with it, when known — never a bare "enter now" for an entry it won't place
           const act = actionText(o.action);
           if (act && !act.live) {
@@ -153,8 +212,8 @@
         }
       } else if (['WAIT_FOR_CONFIRMATION', 'WAIT_FOR_RETEST', 'WAIT_FOR_REJECTION', 'CONFIRMED'].includes(o.state)) {
         const w = waitFor(o);
-        row('ننتظر', w?.what); row('ما يؤكدها', w?.confirm); row('الفريم', framesText(o)); row('نوع الفرصة', KIND[o.kind] || 'فرصة');
-        row('نسبة الربح', payoutText(o.cal)); row('التقدير من البيانات', calText(o.cal)); row('إشارات النسخ', copyText(o.copy || f.copy));
+        row('ننتظر', w?.what); row('ما يؤكدها', w?.confirm); row('التقدير من البيانات', calText(o.cal)); row('الفريم', framesText(o));
+        row('نسبة الربح', payoutText(o.cal)); row('إشارات النسخ', copyText(o.copy || f.copy));
         return { key: 'wait', ...STATUS.wait, label: OPP_STATE[o.state], verdict: 'WAIT', dir: o.dir, title: OPP_STATE[o.state], rows,
           timer: { label: 'تنتهي صلاحيتها خلال', sec: o.expiresAt - nowSec }, facts: f };
       } else if (['MISSED_ENTRY', 'INVALIDATED', 'EXPIRED'].includes(o.state)) {
@@ -170,8 +229,23 @@
     }
     const st = pairStatus({ ...p, opp: null, watch: null }, nowSec);
     const f = p.last?.facts;
+    if (st.key === 'error') row('السبب', dqText(p.feed?.dqCodes));
     if (st.key === 'analyzing' || st.key === 'error') return { ...st, verdict: null, title: st.label, rows, timer: null, facts: f || null };
-    row('السبب', p.last?.conflict ? 'الفريمات متعارضة: فرصة في اتجاه وفرصة عكسها' : p.last?.unclear ? 'الفريم غير واضح الآن (حركة عشوائية أو شموع ضعيفة)' : skipReason(f));
+    // a strategy mode (YouTube): say which strategies it is watching, frame by frame — not the normal engine's vote
+    const soloSet = Array.isArray(cfg?.solo) ? OTC.Strategies.listAll().filter((s) => cfg.solo.includes(s.id) && !(cfg.soloOff || []).includes(s.id) && s.frame) : null;
+    if (soloSet?.length) {
+      const nm = (s) => (s.id === 'keltner_trend_pullback' ? 'كيلتنر' : s.name);
+      row('السبب', 'ولا استراتيجية أدّت إشارة على آخر شمعة — مستني أول واحدة تدّي');
+      for (const tf of [...new Set(soloSet.map((s) => s.frame))].sort((a, b) => a - b)) {
+        const fr = p.frames?.[tf], had = fr?.decision && fr.decision !== 'SKIP';
+        row(`فريم ${frame(tf)}`, `${soloSet.filter((s) => s.frame === tf).map(nm).join(' · ')}${had ? ' ← إشارة!' : ''}`);
+      }
+      return { ...st, key: 'none', tone: 'muted', label: STATUS.none.label, verdict: 'SKIP', title: 'مستني إشارة', rows, timer: null, facts: f || null, solo: true };
+    }
+    row('السبب', p.last?.conflict ? 'الفريمات متعارضة: فرصة في اتجاه وفرصة عكسها' : p.last?.unclear ? 'الفريم غير واضح الآن (حركة عشوائية أو شموع ضعيفة)'
+      : p.last?.cons && p.last.cons.s !== 'AGREE' ? CONS_STATUS[p.last.cons.s] : skipReason(f));
+    row('الاستراتيجيات', p.last?.cons?.n ? `${p.last.cons.c} شراء · ${p.last.cons.p} بيع · ${p.last.cons.w} انتظار` : null);
+    row('التاريخ المشابه', p.hist?.anomalous ? 'سلوك غير معتاد مقارنة بكل ما سُجّل — لا دخول، والتسجيل مستمر' : histText(p.hist?.best));
     return { ...st, key: 'none', tone: 'muted', label: STATUS.none.label, verdict: 'SKIP', title: 'لا توجد فرصة الآن', rows, timer: null, facts: f || null };
   }
 
@@ -179,8 +253,17 @@
   const trendRows = (f) => (f?.trend ? Object.entries(f.trend).sort((a, b) => b[0] - a[0]).map(([tf, d]) => [frame(+tf), TREND[d] || 'غير متاح'])
     : [60, 15, 5].map((k) => [TF[k], TREND[f?.tf?.[k]] || 'غير متاح']));
 
+  // Why a pair's data can't be analysed right now (fatal data-quality codes), and whether it is only temporary.
+  const DQ_TEXT = { MISSING_RECENT: 'شموع ناقصة من تاريخ المنصة — جاري طلبها', TOO_FEW: 'جاري تجميع شموع كافية', NO_DATA: 'لم تصل بيانات بعد',
+    STALE: 'آخر شمعة متأخرة', FEED_STALE: 'الأسعار لا تصل لهذا الزوج', FROZEN: 'الشارت متجمد (أسعار لا تتحرك)', PRICE_MISMATCH: 'السعر الحي بعيد عن الشارت',
+    WRONG_TIMEFRAME: 'فريم الشموع غير صحيح', DUPLICATE: 'بيانات مكررة', OUT_OF_ORDER: 'بيانات غير مرتبة', INVALID_OHLC: 'بيانات تالفة' };
+  const TEMPORARY = ['MISSING_RECENT', 'TOO_FEW', 'NO_DATA'];
+  const dqText = (codes) => [...new Set((codes || []).map((c) => DQ_TEXT[c]).filter(Boolean))].slice(0, 2).join('، ') || null;
   function pairStatus(p, nowSec) {
-    if (p.feed?.dqOk === false && !p.opp) return { key: 'error', ...STATUS.error };
+    if (p.feed?.dqOk === false && !p.opp) {
+      const codes = p.feed.dqCodes || [];
+      return codes.length && codes.every((c) => TEMPORARY.includes(c)) ? { key: 'error', label: 'جاري استكمال البيانات', tone: 'muted' } : { key: 'error', ...STATUS.error };
+    }
     if (p.opp || p.watch) {
       const d = decision(p, nowSec);
       if (d.key !== 'none') return { key: d.key, label: d.label, tone: d.tone, dir: d.dir };
@@ -230,8 +313,10 @@
     weak: 'التوافق غير كافٍ بعد', scanner: 'الإشارة ليست قوية بما يكفي', timing: 'فات وقت الدخول لهذه الشمعة', conflict: 'الإشارات متعارضة',
     htf_conflict: 'الاتجاهات الزمنية الأكبر عكس الفكرة', level: 'منطقة سعرية قوية تعترض الحركة', late: 'الحركة ممتدة والدخول متأخر',
     filter: 'ظرف ثبت تاريخيًا أن نتائجه ضعيفة', risk: 'حدود الحماية تمنع صفقة جديدة الآن', other: 'لا توجد فرصة مناسبة',
+    no_keltner: 'لا توجد إشارة كيلتنر على آخر شمعة 10 دقائق — في انتظار الشمعة الجاية',
+    no_youtube: 'ولا استراتيجية أعطت إشارة على هذه الشمعة',
   };
-  const ORDER = ['risk', 'data', 'filter', 'htf_conflict', 'conflict', 'level', 'late', 'timing', 'regime', 'no_setup', 'weak', 'scanner', 'other'];
+  const ORDER = ['risk', 'data', 'no_keltner', 'no_youtube', 'filter', 'htf_conflict', 'conflict', 'level', 'late', 'timing', 'regime', 'no_setup', 'weak', 'scanner', 'other'];
   const skipReason = (f) => SKIP[ORDER.find((c) => f?.skip?.includes(c)) || 'other'];
 
   const ZONE = { level: (d) => (d === 'CALL' ? 'عند منطقة دعم' : 'عند منطقة مقاومة'), band: () => 'عند طرف النطاق', fib: () => 'في منطقة تصحيح',
@@ -297,6 +382,7 @@
     WATCHLIST: { text: 'تم التحقق', tone: 'go', note: 'اجتاز الاختبار ويحتاج قرارك لاعتماده.' },
     PROMOTED: { text: 'معتمد', tone: 'go', note: 'مفعّل ضمن الاستراتيجيات المستخدمة.' },
     DECAYING: { text: 'تراجع أداؤه', tone: 'bad', note: 'تراجعت نتائجه مؤخرًا فتوقف استخدامه.' },
+    RETIRED: { text: 'متقاعد', tone: 'muted', note: 'أوقفته نهائيًا؛ يبقى في السجل للرجوع إليه.' },
     SUSPENDED: { text: 'متوقف', tone: 'muted', note: 'أوقفته يدويًا.' },
     UNSTABLE: { text: 'غير مستقر', tone: 'bad', note: 'نتائجه تتغير كثيرًا بين الفترات.' },
     VALIDATING: { text: 'ينتظر بيانات', tone: 'muted', note: 'يحتاج بيانات أكثر قبل الحكم عليه.' },
@@ -374,6 +460,12 @@
   };
   const SEQ = { 'U+': 'صاعدة قوية', U: 'صاعدة', N: 'دوجي', D: 'هابطة', 'D+': 'هابطة قوية' };
   const OPS = { '<=': '≤', '>=': '≥', '==': '=', '!=': '≠' };
+  // market-state features (normalized: σ = the pair's own recent volatility)
+  const ST_AR = { z1: 'آخر حركة (σ)', z2: 'الحركة قبلها (σ)', mom3: 'الحركة في آخر 3 شموع (σ)', mom12: 'الحركة في آخر 12 شمعة (σ)', accel: 'تسارع آخر حركة',
+    decel: 'الخطوات بتصغر', run: 'طول السلسلة (+صعود / −هبوط)', pos: 'مكان السعر في النطاق (0 قاع، 1 قمة)', distHi: 'البعد عن قمة النطاق (σ)', distLo: 'البعد عن قاع النطاق (σ)',
+    sinceHi: 'شموع من آخر قمة', sinceLo: 'شموع من آخر قاع', brkHi: 'اختراق قمة النطاق الآن', brkLo: 'كسر قاع النطاق الآن', failHi: 'اختراق فاشل للقمة', failLo: 'كسر فاشل للقاع',
+    volr: 'التذبذب الآن مقارنة بقبل', volChange: 'تغيّر التذبذب', range1: 'مدى آخر شمعة (σ)', body: 'جسم آخر شمعة / مداها', upWick: 'نسبة الذيل العلوي', loWick: 'نسبة الذيل السفلي',
+    seq3: 'اتجاه آخر 3 شموع', hour4: 'وقت اليوم (كل 4 ساعات، UTC)' };
   function featName(id) {
     if (id.startsWith('strat.')) return `ظهور «${strategyName(id.slice(6))}»`;
     if (id.startsWith('pa.')) {
@@ -385,6 +477,7 @@
       return `${PATTERN[base] || 'نموذج شموع'}${dirAr && !/(شرائي|بيعي)$/.test(PATTERN[base] || '') ? ` ${dirAr}` : ''} (5د)`;
     }
     if (id === 'pair') return 'الزوج';
+    if (id.startsWith('st.')) return ST_AR[id.slice(3)] || id;
     if (id === 'seq2') return 'آخر شمعتين';
     if (id === 'seq3') return 'آخر 3 شموع';
     if (id === 'd5.rsi') return 'انحراف RSI (5د)';
@@ -435,7 +528,7 @@
     for (const f of r.flags || []) if (FLAG[f]) out.push(FLAG[f]);
     return out;
   }
-  G.AR = { DIR, REGIME, TREND, TF, KIND, PATTERN, STATUS, RANK, RISK, FRAME, OPP_STATE, ENTRY_WHY, frame, duration, clock, decision, expiryWhy, endWhy, framesText, waitFor, trendRows, calText, blockText, BLOCK, MODEL, actionText, RISK_FLAG, SKIP, ZONE, MOMENTUM, ALIGN, RESULT, DISC_STATUS, STRATEGY, GROUP,
-    pair, conf, pairStatus, why, skipReason, timing, ago, count, execState, discName, bestUse, strategyName, condLabel, featName, discExplain, discLimitations, ORIGIN,
+  G.AR = { DIR, REGIME, TREND, TF, KIND, PATTERN, STATUS, RANK, RISK, FRAME, OPP_STATE, ENTRY_WHY, frame, duration, clock, decision, expiryWhy, endWhy, framesText, waitFor, trendRows, calText, blockText, BLOCK, MODEL, actionText, RISK_FLAG, copySource, SKIP, ZONE, MOMENTUM, ALIGN, RESULT, DISC_STATUS, STRATEGY, GROUP,
+    pair, conf, pairStatus, why, skipReason, timing, ago, count, execState, consText, FAMILY, CONS_STATUS, histText, discName, bestUse, strategyName, condLabel, featName, discExplain, discLimitations, ORIGIN,
     dir: (d) => DIR[d] || 'انتظار', regime: (r) => REGIME[r] || 'غير واضح', trend: (t) => TREND[t] || 'غير متاح', kind: (k) => KIND[k] || 'فرصة' };
 })(typeof globalThis !== 'undefined' ? globalThis : this);
